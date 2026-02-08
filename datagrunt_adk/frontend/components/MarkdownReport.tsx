@@ -24,6 +24,15 @@ const markdownComponents = {
     </div>
   ),
   thead: ({node, ...props}: any) => <thead className="bg-slate-100" {...props} />,
+  tr: ({node, children, ...props}: any) => {
+    // Detect separator rows (all cells empty) and give them a soft divider color
+    const cells = node?.children?.filter((c: any) => c.tagName === 'td') || [];
+    const isSeparator = cells.length > 0 && cells.every((cell: any) => {
+      const text = cell.children?.map((c: any) => c.value || '').join('').trim();
+      return !text;
+    });
+    return <tr className={isSeparator ? 'bg-primary-50/60' : ''} {...props}>{children}</tr>;
+  },
   th: ({node, ...props}: any) => <th className="border border-slate-200 px-3 py-2 text-left font-semibold text-slate-700" {...props} />,
   td: ({node, ...props}: any) => <td className="border border-slate-200 px-3 py-2 text-slate-600" {...props} />,
   strong: ({node, ...props}: any) => <strong className="font-semibold bg-emerald-50 text-emerald-800 px-1 py-0.5 rounded" {...props} />,

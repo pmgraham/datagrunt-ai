@@ -4,11 +4,10 @@ import { MarkdownReport } from './MarkdownReport';
 import { ToolStatusBar } from './ToolStatusBar';
 import { getDownloadUrl } from '../services/adkService';
 import { Download, Paperclip, Sparkles, Maximize2, FileCheck } from 'lucide-react';
-import { isReportMessage } from '../utils';
-
 interface ChatBubbleProps {
   message: ChatMessage;
   onOpenCanvas?: () => void;
+  isCanvasReport?: boolean;
 }
 
 function splitSafeMarkdown(text: string): { safe: string; tail: string } {
@@ -23,7 +22,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas }) => {
+export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, isCanvasReport }) => {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end mb-4">
@@ -51,10 +50,10 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas })
     );
   }
 
-  // Finalized agent messages with text → compact card OR inline markdown
+  // Finalized agent messages with text → compact card (only the canvas report) OR inline markdown
   // Streaming messages → show streaming text inline
   const isFinalized = !message.isStreaming && !!message.text;
-  const showAsCard = isFinalized && isReportMessage(message.text);
+  const showAsCard = isFinalized && !!isCanvasReport;
 
   // For streaming messages, split markdown safely for partial rendering
   const { safe, tail } = message.isStreaming
@@ -114,7 +113,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas })
             </div>
           ) : isFinalized ? (
             /* Short conversational reply — render inline as markdown */
-            <div className="bg-white rounded-2xl rounded-tl-md border border-slate-200 shadow-sm px-4 py-3">
+            <div className="bg-white rounded-2xl rounded-tl-md border border-slate-200 shadow-sm px-4 py-3 overflow-hidden">
               <MarkdownReport content={message.text} bare />
               {message.downloadableFile && (
                 <div className="mt-3 pt-3 border-t border-slate-100">
