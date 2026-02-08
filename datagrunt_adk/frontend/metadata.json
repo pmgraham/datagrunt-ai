@@ -1,0 +1,5 @@
+{
+  "name": "CleanSlate AI",
+  "description": "A modern, intelligent CSV cleaning and formatting agent powered by Gemini. Upload your raw data and get a pristine dataset with a detailed quality report.",
+  "requestFramePermissions": []
+}

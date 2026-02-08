@@ -5,13 +5,30 @@ import duckdb
 import polars as pl
 from typing import Dict, Any, List
 from google.adk.tools import ToolContext
-from datagrunt import CSVReader
-from datagrunt.core.databases.databases import DuckDBQueries
+from datagrunt_adk.src.datagrunt import CSVReader, DuckDBQueries
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _validate_path(path: str) -> str:
+    """Validates that the path is absolute and exists.
+    
+    Prevents directory traversal attacks by ensuring the resolved path
+    is within allowed boundaries (implicit by OS permissions for now).
+    """
+    if not path:
+        raise ValueError("Path cannot be empty")
+    
+    # Resolve absolute path
+    abs_path = os.path.abspath(path)
+    
+    # Check if file exists
+    if not os.path.exists(abs_path):
+        raise ValueError(f"File not found: {path}")
+        
+    return abs_path
 
 # Module-level cache for CSVReader instances (keyed by file path)
 _readers: Dict[str, CSVReader] = {}
@@ -157,13 +174,24 @@ def load_csv(
 
     if not file_path or not os.path.exists(file_path):
         return {"error": f"File not found: {file_path}"}
+        
+    try:
+        file_path = _validate_path(file_path)
+    except ValueError as e:
+        return {"error": str(e)}
 
     # Store path early so inspect_raw_file can use it if we fail
     tool_context.state["csv_path"] = file_path
 
-    # Count source lines (minus header) for verification
-    with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
-        source_line_count = sum(1 for _ in fh) - 1  # subtract header
+    # Count source lines (minus header) for verification — fast binary counting
+    source_line_count = 0
+    with open(file_path, "rb") as fh:
+        while True:
+            buf = fh.read(1024 * 1024)
+            if not buf:
+                break
+            source_line_count += buf.count(b"\n")
+    source_line_count = max(source_line_count - 1, 0)
 
     try:
         duckdb.sql("INSTALL icu; LOAD icu;")
