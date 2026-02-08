@@ -1,0 +1,6 @@
+*.csv
+.adk/
+.venv/
+.claude/
+__pycache__/
+*.log
