@@ -1,0 +1,5 @@
+google-adk
+duckdb
+polars
+patito
+python-dotenv
