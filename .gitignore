@@ -4,3 +4,9 @@
 .claude/
 __pycache__/
 *.log
+.env
+*.pyc
+.DS_Store
+sample_data/
+data/
+test_data/
