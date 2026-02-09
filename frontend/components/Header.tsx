@@ -14,7 +14,7 @@ export const Header: React.FC<HeaderProps> = ({ onReset }) => {
             <Sparkles className="w-4 h-4" />
           </div>
           <span className="text-lg font-bold bg-clip-text text-transparent bg-gradient-to-r from-slate-900 to-slate-700">
-            CleanSlate AI
+            DataGrunt AI
           </span>
         </div>
         <div className="flex items-center gap-3">
