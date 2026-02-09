@@ -34,5 +34,5 @@ export interface SessionState {
 }
 
 export interface CanvasState {
-  activeTab: 'report' | 'data';
+  isOpen: boolean;
 }

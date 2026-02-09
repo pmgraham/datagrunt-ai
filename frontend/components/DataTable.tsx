@@ -6,11 +6,12 @@ import { Button } from './ui/Button';
 interface DataTableProps {
   data: CleanedDataRow[];
   totalRows?: number;
+  fullHeight?: boolean;
 }
 
-export const DataTable: React.FC<DataTableProps> = ({ data, totalRows }) => {
+export const DataTable: React.FC<DataTableProps> = ({ data, totalRows, fullHeight }) => {
   const [currentPage, setCurrentPage] = useState(1);
-  const rowsPerPage = 10;
+  const rowsPerPage = 25;
 
   if (!data || data.length === 0) {
     return (
@@ -54,8 +55,8 @@ export const DataTable: React.FC<DataTableProps> = ({ data, totalRows }) => {
   };
 
   return (
-    <div className="space-y-4">
-      <div className="flex justify-between items-center mb-4">
+    <div className={`${fullHeight ? 'h-full flex flex-col' : 'space-y-4'}`}>
+      <div className={`flex justify-between items-center ${fullHeight ? 'mb-4 flex-shrink-0' : 'mb-4'}`}>
         <div className="flex items-center gap-2">
             <div className="p-2 bg-emerald-50 rounded-lg">
                 <TableIcon className="w-5 h-5 text-emerald-600" />
@@ -75,22 +76,22 @@ export const DataTable: React.FC<DataTableProps> = ({ data, totalRows }) => {
         </Button>
       </div>
 
-      <div className="overflow-hidden rounded-lg border border-slate-200 shadow-sm bg-white">
-        <div className="overflow-x-auto scrollbar-thin">
+      <div className={`overflow-hidden rounded-lg border border-slate-200 shadow-sm bg-white ${fullHeight ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
+        <div className={`overflow-auto scrollbar-thin ${fullHeight ? 'flex-1 min-h-0' : 'max-h-[60vh]'}`}>
           <table className="w-full text-left text-sm whitespace-nowrap">
-            <thead className="bg-slate-50 border-b border-slate-200">
+            <thead className="bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
               <tr>
                 {columns.map((col) => (
-                  <th key={col} className="px-6 py-3 font-semibold text-slate-700 capitalize">
-                    {col.replace(/_/g, ' ')}
+                  <th key={col} className="px-6 py-3 font-semibold text-slate-700 bg-slate-50">
+                    {col}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {currentRows.map((row, rowIndex) => (
-                <tr 
-                  key={rowIndex} 
+                <tr
+                  key={rowIndex}
                   className="hover:bg-slate-50/80 transition-colors"
                 >
                   {columns.map((col) => (
