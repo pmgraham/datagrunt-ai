@@ -862,8 +862,10 @@ def execute_cleaning_plan(
         }
 
     # Save cleaned file next to the original with a _cleaned suffix
+    # Strip any existing _cleaned suffix(es) to avoid stacking them
     old_path = tool_context.state.get("csv_path")
     base, ext = os.path.splitext(old_path)
+    base = _re.sub(r'(_cleaned)+$', '', base)
     cleaned_path = f"{base}_cleaned{ext}"
 
     duckdb.sql(f"COPY data TO '{cleaned_path}' (HEADER, DELIMITER ',')")
