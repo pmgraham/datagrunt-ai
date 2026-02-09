@@ -713,6 +713,12 @@ def preview_full_plan(sql_statements: List[str], tool_context: ToolContext) -> D
     else:
         after = duckdb.sql("SELECT * FROM data LIMIT 10").pl()
 
+    # Drop the temporary _row_id column so it doesn't pollute the data table
+    try:
+        duckdb.sql("ALTER TABLE data DROP COLUMN _row_id")
+    except Exception:
+        pass  # Column may not exist if there was an error
+
     return {
         "before": _to_markdown(before, exclude=["_row_id"]),
         "after": _to_markdown(after, exclude=["_row_id"]),
