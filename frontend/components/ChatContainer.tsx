@@ -35,7 +35,13 @@ export const ChatContainer: React.FC<ChatContainerProps> = ({
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <MessageList messages={messages} onOpenCanvas={onOpenCanvas} uploadProgress={uploadProgress} />
+      <MessageList
+        messages={messages}
+        onOpenCanvas={onOpenCanvas}
+        uploadProgress={uploadProgress}
+        onSendMessage={onSendMessage}
+        isAgentRunning={isAgentRunning}
+      />
       <ChatInput
         onSendMessage={onSendMessage}
         onFileUpload={onFileUpload}

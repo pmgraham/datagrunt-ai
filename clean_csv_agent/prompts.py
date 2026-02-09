@@ -1,24 +1,19 @@
-import os
+"""Agent instruction prompts for the clean_csv_agent system."""
 
-from dotenv import load_dotenv
-from google.adk.agents import Agent
-from google.adk.tools.function_tool import FunctionTool
-from google.adk.tools.agent_tool import AgentTool
-
-from datagrunt_adk.src import tools
-from datagrunt_adk.src.duckdb_reference import DUCKDB_SQL_REFERENCE
-
-load_dotenv()
+from clean_csv_agent.src.duckdb_reference import DUCKDB_SQL_REFERENCE
 
 # ---------------------------------------------------------------------------
-# Specialized Agents (The "Workers") - Return raw findings
+# Sub-Agent Prompts
 # ---------------------------------------------------------------------------
 
 PROFILER_PROMPT = """
 You are a Profiler. Return raw data about the spreadsheet structure.
-1. Run 'get_smart_schema'.
-2. Run 'suggest_type_coercion' for all columns.
-Return only the raw results of these tools.
+
+You have EXACTLY two tools — use ONLY these, nothing else:
+1. 'get_smart_schema' — call once to get column types and stats.
+2. 'suggest_type_coercion' — call for each column to get type recommendations.
+
+Return only the raw results of these tools. Do NOT call any tool not listed above.
 """
 
 AUDITOR_PROMPT = """
@@ -35,51 +30,18 @@ Return only the raw findings. Do NOT call any tool not listed above.
 
 PATTERN_PROMPT = """
 You are a Consistency Specialist. Return raw data about patterns.
-1. Run 'get_value_distribution' for text columns.
-2. Run 'check_column_logic' for related columns.
-3. Run 'query_data' for whitespace and missing labels ('N/A').
-Return only the raw findings.
+
+You have EXACTLY three tools — use ONLY these, nothing else:
+1. 'get_value_distribution' — call for text columns to find value patterns.
+2. 'check_column_logic' — call for related columns to find logical issues.
+3. 'query_data' — call with SQL to find whitespace and missing labels ('N/A').
+
+Return only the raw findings. Do NOT call any tool not listed above.
 """
 
-profiler_agent = Agent(
-    name="Profiler",
-    model=os.getenv("GOOGLE_MODEL_NAME", "gemini-2.5-flash"),
-    instruction=PROFILER_PROMPT,
-    tools=[
-        FunctionTool(func=tools.get_smart_schema),
-        FunctionTool(func=tools.suggest_type_coercion),
-    ],
-)
-
-auditor_agent = Agent(
-    name="Auditor",
-    model=os.getenv("GOOGLE_MODEL_NAME", "gemini-2.5-flash"),
-    instruction=AUDITOR_PROMPT,
-    tools=[
-        FunctionTool(func=tools.detect_type_pollution),
-        FunctionTool(func=tools.detect_advanced_anomalies),
-        FunctionTool(func=tools.detect_date_formats),
-    ],
-)
-
-pattern_agent = Agent(
-    name="PatternExpert",
-    model=os.getenv("GOOGLE_MODEL_NAME", "gemini-2.5-flash"),
-    instruction=PATTERN_PROMPT,
-    tools=[
-        FunctionTool(func=tools.get_value_distribution),
-        FunctionTool(func=tools.check_column_logic),
-        FunctionTool(func=tools.query_data),
-    ],
-)
-
 # ---------------------------------------------------------------------------
-
-# Coordinator Agent (The "Interface")
-
+# Coordinator Prompt
 # ---------------------------------------------------------------------------
-
-
 
 COORDINATOR_PROMPT = f"""You are a friendly Data Assistant.
 
@@ -221,37 +183,3 @@ or approve the plan. Handle each type of request appropriately:
 
 {DUCKDB_SQL_REFERENCE}
 """
-
-
-
-root_agent = Agent(
-
-    name="DataGruntScientist",
-
-    model=os.getenv("GOOGLE_MODEL_NAME", "gemini-2.5-flash"),
-
-    instruction=COORDINATOR_PROMPT,
-
-    tools=[
-
-        AgentTool(agent=profiler_agent),
-
-        AgentTool(agent=auditor_agent),
-
-        AgentTool(agent=pattern_agent),
-
-        FunctionTool(func=tools.load_csv),
-
-        FunctionTool(func=tools.inspect_raw_file),
-
-        FunctionTool(func=tools.preview_full_plan),
-
-        FunctionTool(func=tools.execute_cleaning_plan),
-
-        FunctionTool(func=tools.validate_cleaned_data),
-
-        FunctionTool(func=tools.query_data),
-
-    ],
-
-)

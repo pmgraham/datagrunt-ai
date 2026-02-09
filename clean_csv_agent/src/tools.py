@@ -1,11 +1,13 @@
-import tempfile
 import os
+import re as _re
+import tempfile
+from typing import Any, Dict, List
 
 import duckdb
 import polars as pl
-from typing import Dict, Any, List
 from google.adk.tools import ToolContext
-from datagrunt_adk.src.datagrunt import CSVReader, DuckDBQueries
+
+from clean_csv_agent.src.datagrunt import CSVReader, DuckDBQueries
 
 
 # ---------------------------------------------------------------------------
@@ -75,8 +77,6 @@ def _validate_column(column: str, table: str) -> Dict[str, Any] | None:
         }
     return None
 
-
-import re as _re
 
 _DESTRUCTIVE_PATTERN = _re.compile(
     r"^\s*(DELETE\b|DROP\s+TABLE\b|TRUNCATE\b)",
@@ -554,55 +554,6 @@ def query_data(sql: str, tool_context: ToolContext) -> Dict[str, Any]:
     return {
         "result": _to_markdown(result),
         "available_columns": columns,
-    }
-
-
-def preview_cleaning_step(sql: str, tool_context: ToolContext) -> Dict[str, Any]:
-    """Shows before/after examples for a single cleaning SQL statement.
-
-    Loads the CSV into `data`, snapshots rows BEFORE the change, applies
-    the SQL, then snapshots the same rows AFTER. Returns both as markdown
-    tables so users can see the concrete impact.
-    """
-    reader = _get_reader(tool_context)
-    table = reader.db_table
-    _ensure_table(reader)
-
-    duckdb.sql(f"""
-        CREATE OR REPLACE TABLE data AS
-        SELECT ROW_NUMBER() OVER () as _row_id, *
-        FROM {table}
-    """)
-
-    before = duckdb.sql("SELECT * FROM data LIMIT 10").pl()
-    before_dicts = before.to_dicts()
-
-    try:
-        duckdb.sql(sql)
-    except duckdb.BinderException as e:
-        columns = _get_column_names(table)
-        return {
-            "error": str(e),
-            "available_columns": columns,
-            "table_name": table,
-            "sql": sql,
-        }
-    except Exception as e:
-        return {"error": str(e), "sql": sql}
-
-    if before_dicts:
-        row_ids = [r["_row_id"] for r in before_dicts]
-        placeholders = ", ".join(str(rid) for rid in row_ids)
-        after = duckdb.sql(
-            f"SELECT * FROM data WHERE _row_id IN ({placeholders})"
-        ).pl()
-    else:
-        after = duckdb.sql("SELECT * FROM data LIMIT 10").pl()
-
-    return {
-        "before": _to_markdown(before, exclude=["_row_id"]),
-        "after": _to_markdown(after, exclude=["_row_id"]),
-        "sql": sql,
     }
 
 

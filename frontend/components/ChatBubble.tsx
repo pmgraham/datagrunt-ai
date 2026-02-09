@@ -3,11 +3,14 @@ import { ChatMessage } from '../types';
 import { MarkdownReport } from './MarkdownReport';
 import { ToolStatusBar } from './ToolStatusBar';
 import { getDownloadUrl } from '../services/adkService';
-import { Download, Paperclip, Sparkles, Maximize2, FileCheck } from 'lucide-react';
+import { Download, Paperclip, Sparkles, Maximize2, FileCheck, CheckCircle, Edit3 } from 'lucide-react';
+
 interface ChatBubbleProps {
   message: ChatMessage;
   onOpenCanvas?: () => void;
   isCanvasReport?: boolean;
+  onSendMessage?: (text: string) => void;
+  showActions?: boolean;
 }
 
 function splitSafeMarkdown(text: string): { safe: string; tail: string } {
@@ -22,7 +25,7 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, isCanvasReport }) => {
+export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, isCanvasReport, onSendMessage, showActions }) => {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end mb-4">
@@ -110,6 +113,25 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, i
                   </a>
                 )}
               </div>
+
+              {showActions && onSendMessage && (
+                <div className="mt-3 pt-3 border-t border-slate-100 flex items-center gap-3">
+                  <button
+                    onClick={() => onSendMessage('Yes, apply the cleaning plan.')}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    Accept Plan
+                  </button>
+                  <button
+                    onClick={() => onSendMessage('I would like to make some changes to the plan before applying it.')}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-amber-800 bg-amber-100 hover:bg-amber-200 rounded-lg transition-colors"
+                  >
+                    <Edit3 className="w-4 h-4" />
+                    Make Changes
+                  </button>
+                </div>
+              )}
             </div>
           ) : isFinalized ? (
             /* Short conversational reply — render inline as markdown */

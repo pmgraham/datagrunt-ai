@@ -8,9 +8,11 @@ interface MessageListProps {
   messages: ChatMessage[];
   onOpenCanvas?: () => void;
   uploadProgress?: number | null;
+  onSendMessage?: (text: string) => void;
+  isAgentRunning?: boolean;
 }
 
-export const MessageList: React.FC<MessageListProps> = ({ messages, onOpenCanvas, uploadProgress }) => {
+export const MessageList: React.FC<MessageListProps> = ({ messages, onOpenCanvas, uploadProgress, onSendMessage, isAgentRunning }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -35,8 +37,15 @@ export const MessageList: React.FC<MessageListProps> = ({ messages, onOpenCanvas
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto px-4 py-6">
       <div className="max-w-5xl mx-auto">
-        {messages.map((msg) => (
-          <ChatBubble key={msg.id} message={msg} onOpenCanvas={onOpenCanvas} isCanvasReport={msg.id === canvasReportId} />
+        {messages.map((msg, idx) => (
+          <ChatBubble
+            key={msg.id}
+            message={msg}
+            onOpenCanvas={onOpenCanvas}
+            isCanvasReport={msg.id === canvasReportId}
+            onSendMessage={onSendMessage}
+            showActions={msg.id === canvasReportId && idx === messages.length - 1 && !isAgentRunning}
+          />
         ))}
 
         {uploadProgress != null && (

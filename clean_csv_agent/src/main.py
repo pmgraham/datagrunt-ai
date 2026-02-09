@@ -1,8 +1,10 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
 import os
+
+import uvicorn
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # Import the agent from our local module
 # Adjust import path based on structure
@@ -14,8 +16,6 @@ except ImportError:
 # Initialize FastAPI
 app = FastAPI(title="DataGrunt Scientist API")
 load_dotenv()
-
-from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,

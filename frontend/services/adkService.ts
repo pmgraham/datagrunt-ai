@@ -1,7 +1,7 @@
 import { CleanedDataRow } from '../types';
 
 const API_BASE = '/api';
-const APP_NAME = 'datagrunt_adk';
+const APP_NAME = 'clean_csv_agent';
 const USER_ID = 'web_user';
 
 export const FRIENDLY_NAMES: Record<string, string> = {
