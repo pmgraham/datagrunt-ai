@@ -3,6 +3,7 @@ import { ChatMessage } from '../types';
 import { MarkdownReport } from './MarkdownReport';
 import { ToolStatusBar } from './ToolStatusBar';
 import { getDownloadUrl } from '../services/adkService';
+import { deduplicateReport } from '../utils';
 import { Download, Paperclip, Sparkles, Maximize2, FileCheck, CheckCircle, Edit3 } from 'lucide-react';
 
 interface ChatBubbleProps {
@@ -125,7 +126,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, i
           ) : isFinalized ? (
             /* Short conversational reply — render inline as markdown */
             <div className="bg-white rounded-2xl rounded-tl-md border border-slate-200 shadow-sm px-4 py-3 overflow-hidden">
-              <MarkdownReport content={message.text} bare />
+              <MarkdownReport content={deduplicateReport(message.text)} bare />
               {message.downloadableFile && (
                 <div className="mt-3 pt-3 border-t border-slate-100">
                   <a
