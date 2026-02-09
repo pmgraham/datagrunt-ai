@@ -1,7 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { CleanedDataRow } from '../types';
 import { DataTable } from './DataTable';
-import { X } from 'lucide-react';
+import { X, Send } from 'lucide-react';
 
 interface DataTableModalProps {
   isOpen: boolean;
@@ -9,6 +9,8 @@ interface DataTableModalProps {
   data: CleanedDataRow[] | null;
   totalRows: number;
   loading: boolean;
+  onSendMessage: (text: string) => void;
+  isAgentRunning: boolean;
 }
 
 export const DataTableModal: React.FC<DataTableModalProps> = ({
@@ -17,7 +19,31 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
   data,
   totalRows,
   loading,
+  onSendMessage,
+  isAgentRunning,
 }) => {
+  const [inputText, setInputText] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleSubmit = useCallback(() => {
+    const trimmed = inputText.trim();
+    if (!trimmed || isAgentRunning) return;
+    onSendMessage(trimmed);
+    setInputText('');
+  }, [inputText, isAgentRunning, onSendMessage]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+    // Don't close modal on Escape if input is focused
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      inputRef.current?.blur();
+    }
+  }, [handleSubmit]);
+
   // Close on Escape key
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
@@ -68,6 +94,34 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
           {!loading && data && (
             <DataTable data={data} totalRows={totalRows} fullHeight />
           )}
+        </div>
+
+        {/* Chat Input */}
+        <div className="border-t border-slate-200 bg-slate-50 px-6 py-4">
+          <div className="flex items-center gap-3 max-w-3xl mx-auto">
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask a question about this data..."
+              disabled={isAgentRunning}
+              className="flex-1 px-4 py-2.5 text-sm rounded-lg border border-slate-200 bg-white text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent disabled:opacity-50"
+            />
+            <button
+              type="button"
+              onClick={handleSubmit}
+              disabled={isAgentRunning || !inputText.trim()}
+              className="p-2.5 rounded-lg bg-primary-600 text-white hover:bg-primary-700 disabled:bg-slate-300 disabled:cursor-not-allowed transition-colors"
+              title="Send message"
+            >
+              <Send className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-xs text-slate-400 text-center mt-2">
+            Messages appear in the main chat
+          </p>
         </div>
       </div>
     </div>
