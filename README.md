@@ -70,6 +70,9 @@ python -m uvicorn clean_csv_agent.server:app --host 0.0.0.0 --port 8000 --reload
 
 ### Frontend Setup
 
+> **[IMPORTANT NOTE]**
+> **The included frontend was built for demo and prototyping purposes. It is not production-ready. You're welcome to use it as a starting point, build your own, or skip it entirely — the backend and agent system work independently via the FastAPI server.**
+
 ```bash
 cd frontend
 
@@ -105,13 +108,13 @@ GOOGLE_GENAI_USE_VERTEXAI=true
 
 ```env
 # Default model for all agents
-DEFAULT_MODEL=gemini-2.5-flash
+DEFAULT_MODEL=gemini-3-flash-preview
 
 # Optional: override per agent
-COORDINATOR_MODEL=gemini-2.5-flash
-PROFILER_MODEL=gemini-2.5-flash
-AUDITOR_MODEL=gemini-2.5-flash
-PATTERN_EXPERT_MODEL=gemini-2.5-flash
+COORDINATOR_MODEL=gemini-3-flash-preview
+PROFILER_MODEL=gemini-3-flash-preview
+AUDITOR_MODEL=gemini-3-flash-preview
+PATTERN_EXPERT_MODEL=gemini-3-flash-preview
 ```
 
 ## Data Cleaning Tools
