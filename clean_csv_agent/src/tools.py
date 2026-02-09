@@ -775,3 +775,285 @@ def execute_cleaning_plan(
         "cleaned_file": cleaned_path,
         "sample": _to_markdown(sample),
     }
+
+
+# ---------------------------------------------------------------------------
+# Column Overflow Detection and Repair
+# ---------------------------------------------------------------------------
+
+def detect_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
+    """Detects column overflow where fields are split across multiple columns.
+
+    This happens when a CSV field contains unquoted delimiters, causing data
+    to shift into extra columns. The tool checks three indicators:
+
+    1. Sequential Sparsity: Columns at the end that are mostly NULL
+    2. Row-Level Value Variance: Some rows have more non-null values than others
+    3. Overflow Column Pattern: Columns named like 'column_N' or 'unnamed_N'
+
+    Run this immediately after load_csv to detect structural issues.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    columns = _get_column_names(table)
+    total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    findings = {
+        "overflow_detected": False,
+        "indicators": [],
+        "suspected_anchor_column": None,
+        "overflow_columns": [],
+        "total_columns": len(columns),
+        "total_rows": total_rows,
+    }
+
+    # 1. Check for sequential sparsity at the end of the table
+    # Get null counts per column
+    null_counts = {}
+    for col in columns:
+        result = duckdb.sql(f'''
+            SELECT COUNT(*) - COUNT("{col}") as null_count
+            FROM {table}
+        ''').fetchone()
+        null_counts[col] = result[0]
+
+    # Find columns at the end that are mostly NULL (>80% null)
+    sparse_threshold = total_rows * 0.8
+    overflow_cols = []
+    for col in reversed(columns):
+        if null_counts[col] >= sparse_threshold:
+            overflow_cols.insert(0, col)
+        else:
+            break  # Stop when we hit a non-sparse column
+
+    if overflow_cols:
+        findings["indicators"].append({
+            "type": "sequential_sparsity",
+            "description": f"Found {len(overflow_cols)} columns at end that are >80% NULL",
+            "columns": overflow_cols,
+        })
+        findings["overflow_columns"] = overflow_cols
+
+    # 2. Check for row-level value count variance
+    # Build a query to count non-null values per row
+    count_exprs = " + ".join([f'CASE WHEN "{col}" IS NOT NULL THEN 1 ELSE 0 END' for col in columns])
+    variance_query = f'''
+        SELECT
+            ({count_exprs}) as non_null_count,
+            COUNT(*) as row_count
+        FROM {table}
+        GROUP BY non_null_count
+        ORDER BY non_null_count
+    '''
+    variance_result = duckdb.sql(variance_query).pl()
+
+    if len(variance_result) > 1:
+        min_count = variance_result["non_null_count"].min()
+        max_count = variance_result["non_null_count"].max()
+        if max_count - min_count >= 2:  # Significant variance
+            findings["indicators"].append({
+                "type": "row_value_variance",
+                "description": f"Rows have between {min_count} and {max_count} non-null values",
+                "distribution": variance_result.to_dicts(),
+            })
+
+    # 3. Check for overflow column naming patterns
+    overflow_pattern = _re.compile(r'^(column_?\d+|unnamed[_:]?\d*|field_?\d+|_\d+)$', _re.IGNORECASE)
+    pattern_matches = [col for col in columns if overflow_pattern.match(col)]
+
+    if pattern_matches:
+        findings["indicators"].append({
+            "type": "overflow_column_names",
+            "description": f"Found {len(pattern_matches)} columns with overflow-like names",
+            "columns": pattern_matches,
+        })
+        # Extend overflow columns with pattern matches
+        for col in pattern_matches:
+            if col not in findings["overflow_columns"]:
+                findings["overflow_columns"].append(col)
+
+    # Determine if overflow is detected
+    if len(findings["indicators"]) >= 2 or (
+        len(findings["indicators"]) == 1 and
+        findings["indicators"][0]["type"] == "row_value_variance"
+    ):
+        findings["overflow_detected"] = True
+
+        # Try to identify the anchor column (last non-overflow column before the overflow)
+        if findings["overflow_columns"]:
+            first_overflow = findings["overflow_columns"][0]
+            overflow_idx = columns.index(first_overflow)
+            if overflow_idx > 0:
+                findings["suspected_anchor_column"] = columns[overflow_idx - 1]
+
+    return findings
+
+
+def repair_column_overflow(
+    anchor_column: str,
+    expected_columns: List[str],
+    tool_context: ToolContext
+) -> Dict[str, Any]:
+    """Repairs column overflow by reconstructing shifted data.
+
+    When a CSV field contains unquoted delimiters, data shifts into extra columns.
+    This tool reconstructs the original structure by:
+
+    1. Concatenating all columns from anchor_column to the end
+    2. Using regex to properly parse quoted vs unquoted fields
+    3. Mapping extracted fields back to the expected schema
+    4. Dropping the empty overflow columns
+
+    Args:
+        anchor_column: The column where overflow begins (text-heavy field)
+        expected_columns: List of column names that SHOULD exist after anchor
+                         (e.g., ['outcome', 'status', 'is_duplicate'])
+
+    Returns:
+        Result with before/after samples and validation metrics.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    columns = _get_column_names(table)
+
+    # Validate anchor column exists
+    if anchor_column not in columns:
+        return {
+            "error": f"Anchor column '{anchor_column}' not found",
+            "available_columns": columns,
+        }
+
+    anchor_idx = columns.index(anchor_column)
+    columns_before_anchor = columns[:anchor_idx]
+    columns_from_anchor = columns[anchor_idx:]
+
+    # Snapshot before
+    before_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+
+    # Create the concatenated string from anchor to end
+    concat_parts = [f'COALESCE(CAST("{col}" AS VARCHAR), \'\')' for col in columns_from_anchor]
+    concat_expr = " || ',' || ".join(concat_parts)
+
+    # Use DuckDB's regexp_extract_all to parse respecting quotes
+    # Pattern: Match either "quoted content" or non-comma content
+    parse_query = f'''
+        SELECT
+            {", ".join([f'"{col}"' for col in columns_before_anchor])},
+            regexp_extract_all({concat_expr}, '("(?:[^"]|"")*"|[^,]*)') as parsed_fields
+        FROM {table}
+    '''
+
+    try:
+        parsed = duckdb.sql(parse_query).pl()
+    except Exception as e:
+        return {
+            "error": f"Failed to parse overflow: {str(e)}",
+            "query": parse_query,
+        }
+
+    # Determine how many fields we expect after the anchor
+    # anchor_column + expected_columns
+    expected_field_count = 1 + len(expected_columns)
+
+    # Build the reconstruction query
+    # We need to handle cases where there are more parsed fields than expected
+    # by concatenating excess fields into the anchor column
+
+    reconstruction_cases = []
+    for i, row in enumerate(parsed.to_dicts()):
+        fields = row.get("parsed_fields", [])
+        # Clean up fields - remove surrounding quotes
+        cleaned = []
+        for f in fields:
+            if f and f.startswith('"') and f.endswith('"'):
+                cleaned.append(f[1:-1].replace('""', '"'))
+            else:
+                cleaned.append(f if f else None)
+
+        # If more fields than expected, merge extras into anchor
+        if len(cleaned) > expected_field_count:
+            excess = len(cleaned) - expected_field_count
+            anchor_parts = cleaned[:excess + 1]
+            anchor_value = ", ".join([p for p in anchor_parts if p])
+            final_fields = [anchor_value] + cleaned[excess + 1:]
+        else:
+            final_fields = cleaned
+
+        reconstruction_cases.append(final_fields)
+
+    # Create new table with corrected structure
+    new_columns = columns_before_anchor + [anchor_column] + expected_columns
+
+    # Build VALUES clause for the corrected data
+    # This is a simplified approach - for large datasets we'd use a different method
+    rows_data = []
+    original_data = duckdb.sql(f"SELECT * FROM {table}").pl().to_dicts()
+
+    for i, orig_row in enumerate(original_data):
+        new_row = {}
+        # Copy columns before anchor
+        for col in columns_before_anchor:
+            new_row[col] = orig_row[col]
+
+        # Get parsed fields for this row
+        if i < len(reconstruction_cases):
+            fields = reconstruction_cases[i]
+            # Map to new columns
+            for j, col in enumerate([anchor_column] + expected_columns):
+                if j < len(fields):
+                    new_row[col] = fields[j]
+                else:
+                    new_row[col] = None
+        rows_data.append(new_row)
+
+    # Create new table
+    # First create empty table with correct schema
+    col_defs = ", ".join([f'"{col}" VARCHAR' for col in new_columns])
+    duckdb.sql(f"CREATE OR REPLACE TABLE {table}_repaired ({col_defs})")
+
+    # Insert data
+    if rows_data:
+        # Use parameterized insert for safety
+        placeholders = ", ".join(["?" for _ in new_columns])
+        insert_sql = f'INSERT INTO {table}_repaired VALUES ({placeholders})'
+
+        for row in rows_data:
+            values = [row.get(col) for col in new_columns]
+            duckdb.execute(insert_sql, values)
+
+    # Replace original table
+    duckdb.sql(f"DROP TABLE IF EXISTS {table}")
+    duckdb.sql(f"ALTER TABLE {table}_repaired RENAME TO {table}")
+
+    # Validate: check row count preserved and value variance eliminated
+    after_count = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    after_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+
+    # Check value variance after repair
+    new_columns_list = _get_column_names(table)
+    count_exprs = " + ".join([f'CASE WHEN "{col}" IS NOT NULL THEN 1 ELSE 0 END' for col in new_columns_list])
+    variance_after = duckdb.sql(f'''
+        SELECT
+            ({count_exprs}) as non_null_count,
+            COUNT(*) as row_count
+        FROM {table}
+        GROUP BY non_null_count
+    ''').pl()
+
+    variance_reduced = len(variance_after) == 1
+
+    return {
+        "success": True,
+        "rows_processed": after_count,
+        "columns_before": len(columns),
+        "columns_after": len(new_columns_list),
+        "columns_removed": len(columns) - len(new_columns_list),
+        "variance_eliminated": variance_reduced,
+        "new_schema": new_columns_list,
+        "before_sample": _to_markdown(before_sample),
+        "after_sample": _to_markdown(after_sample),
+    }
