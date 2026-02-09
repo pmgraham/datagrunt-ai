@@ -1,20 +1,29 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# DataGrunt AI — Frontend
 
-# Run and deploy your AI Studio app
+React + TypeScript web interface for DataGrunt AI.
 
-This contains everything you need to run your app locally.
+## Prerequisites
 
-View your app in AI Studio: https://ai.studio/apps/drive/1I9bjL3ktfkUTseE4MmkTpl7-Q2w2dpzE
+- Node.js 18+
 
-## Run Locally
-
-**Prerequisites:**  Node.js
-
+## Setup
 
 1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+   ```bash
+   npm install
+   ```
+
+2. Start the dev server:
+   ```bash
+   npm run dev
+   ```
+
+The app runs at `http://localhost:3000` and proxies API requests to the backend at `http://127.0.0.1:8000`.
+
+## Production Build
+
+```bash
+npm run build
+```
+
+Output is written to `dist/`.

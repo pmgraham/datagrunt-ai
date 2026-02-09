@@ -10,3 +10,18 @@ __pycache__/
 sample_data/
 data/
 test_data/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Data files
+*.xlsx
+*.xls
+*.parquet
+*.feather
+
+# Credentials
+credentials*.json
+service-account*.json
