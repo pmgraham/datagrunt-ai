@@ -4,7 +4,7 @@ import { MarkdownReport } from './MarkdownReport';
 import { DataTable } from './DataTable';
 import { fetchPreviewRows } from '../services/adkService';
 import { getDownloadUrl } from '../services/adkService';
-import { X, Download, FileText, Table as TableIcon } from 'lucide-react';
+import { X, Download, FileText, Table as TableIcon, FileDown } from 'lucide-react';
 import { isReportMessage } from '../utils';
 
 interface CanvasProps {
@@ -87,6 +87,24 @@ export const Canvas: React.FC<CanvasProps> = ({
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-slate-50/80">
         <h2 className="text-sm font-semibold text-slate-700">Analysis Report</h2>
         <div className="flex items-center gap-1">
+          {reportContent && (
+            <button
+              onClick={() => {
+                const blob = new Blob([reportContent], { type: 'text/markdown;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'analysis_report.md';
+                a.click();
+                URL.revokeObjectURL(url);
+              }}
+              className="p-1 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors"
+              aria-label="Download report as Markdown"
+              title="Download report as Markdown"
+            >
+              <FileDown className="w-4 h-4" />
+            </button>
+          )}
           {latestFilePath && (
             <a
               href={getDownloadUrl(latestFilePath)}
