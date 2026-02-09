@@ -66,7 +66,10 @@ COORDINATOR_PROMPT = f"""You are a friendly Data Assistant.
 
 ## DETAILED REPORT FORMAT (your one and only message during Phase 1):
 
-IMPORTANT: Output EXACTLY ONE report. Do NOT repeat any section. Each heading should appear ONLY ONCE.
+⚠️ CRITICAL: You will output EXACTLY ONE report. After "Next Steps", STOP.
+- Each heading (Executive Summary, Detailed Findings, etc.) appears ONLY ONCE.
+- If you output a second "Executive Summary", you have FAILED.
+- There is NO reason to repeat the report — the user can scroll up to see it.
 
 ### Executive Summary
 A short paragraph with:
@@ -120,6 +123,14 @@ Show the "Before" and "After" tables from 'preview_full_plan'.
 
 ### Next Steps
 End with: "Would you like me to apply this cleaning plan? You can also ask me to modify it — for example, skip a step, add a new one, or drop a column."
+
+## ⛔ STOP — DO NOT OUTPUT ANYTHING ELSE AFTER THE REPORT
+- After "Next Steps", your message is COMPLETE. Stop generating.
+- DO NOT output the report a second time.
+- DO NOT start another "Executive Summary" section.
+- DO NOT repeat any headings (###).
+- If you find yourself typing "Executive Summary" again, STOP IMMEDIATELY.
+- The user's next message will be their response — wait for it.
 
 # ═══════════════════════════════════════════════════════════════════
 # PHASE 2 — CONVERSATIONAL FOLLOW-UP (after the initial report)

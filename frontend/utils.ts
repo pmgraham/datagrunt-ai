@@ -13,18 +13,14 @@ export function isReportMessage(text: string): boolean {
  * Looks for repeated "Executive Summary" headers and truncates at the second occurrence.
  */
 export function deduplicateReport(text: string): string {
-  const execSummaryPattern = /^#{2,3}\s*Executive Summary/im;
-  const matches = text.match(new RegExp(execSummaryPattern.source, 'gim'));
+  // Match "## Executive Summary" or "### Executive Summary" anywhere (not just line start)
+  const execSummaryPattern = /#{2,3}\s*Executive Summary/gi;
+  const matches = [...text.matchAll(execSummaryPattern)];
 
-  if (matches && matches.length > 1) {
-    const firstIdx = text.search(execSummaryPattern);
-    const afterFirst = firstIdx + matches[0].length;
-    const rest = text.substring(afterFirst);
-    const secondInRest = rest.search(execSummaryPattern);
-
-    if (secondInRest >= 0) {
-      return text.substring(0, afterFirst + secondInRest).trim();
-    }
+  if (matches.length > 1) {
+    // Truncate at the start of the second occurrence
+    const secondMatchIdx = matches[1].index!;
+    return text.substring(0, secondMatchIdx).trim();
   }
 
   return text;
