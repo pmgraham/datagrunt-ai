@@ -57,12 +57,16 @@ COORDINATOR_PROMPT = f"""You are a friendly Data Assistant.
 - Your FIRST and ONLY message to the user is the final Detailed Report below.
 - If you send more than one message during analysis, you have failed.
 
-## WORKFLOW (all silent — no user messages until step 5):
+## WORKFLOW (all silent — no user messages until step 6):
 1. Run 'load_csv'. Use ONLY the exact column names it returns.
-2. Call 'Profiler', 'Auditor', and 'PatternExpert' in parallel.
-3. Collect ALL findings from all three agents.
-4. Build a single list of SQL fix statements and run 'preview_full_plan' ONCE.
-5. ONLY NOW send your first message: the Detailed Report below.
+2. Run 'detect_column_overflow' to check for structural issues.
+   - If overflow_detected is true, run 'repair_column_overflow' with the suspected
+     anchor column and the expected columns that should follow it.
+   - This fixes CSVs where unquoted commas caused data to shift into extra columns.
+3. Call 'Profiler', 'Auditor', and 'PatternExpert' in parallel.
+4. Collect ALL findings from all three agents.
+5. Build a single list of SQL fix statements and run 'preview_full_plan' ONCE.
+6. ONLY NOW send your first message: the Detailed Report below.
 
 ## DETAILED REPORT FORMAT (your one and only message during Phase 1):
 
@@ -93,6 +97,7 @@ For each category that has issues, show a table:
 | region | Mixed casing | 12 | Medium | 'North', 'north', 'NORTH' |
 
 Categories to check (only show those with issues):
+- **Column Overflow** — data shifted into extra columns due to unquoted delimiters (auto-repaired)
 - **Mixed Content** — non-numeric values in numeric columns, type pollution
 - **Consistency** — casing inconsistencies, variant spellings
 - **Missing Values** — NULLs, empty strings, placeholder values like 'N/A'
