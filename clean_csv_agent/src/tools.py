@@ -317,6 +317,18 @@ def load_csv(
     # Normalize column names
     _normalize_column_names(table)
 
+    # Remove completely empty rows (100% NULL across all columns)
+    columns_list = _get_column_names(table)
+    null_conditions = " AND ".join([f'"{col}" IS NULL' for col in columns_list])
+    empty_row_count = duckdb.sql(f"""
+        SELECT COUNT(*) FROM {table} WHERE {null_conditions}
+    """).fetchone()[0]
+
+    if empty_row_count > 0:
+        duckdb.sql(f"""
+            DELETE FROM {table} WHERE {null_conditions}
+        """)
+
     # Final overflow check after normalization
     final_overflow = _check_overflow_columns(table)
 
@@ -325,7 +337,8 @@ def load_csv(
     columns = duckdb.sql(f"DESCRIBE {table}").pl().to_dicts()
     sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
 
-    rows_lost = source_line_count - total_rows
+    # rows_lost excludes empty rows (those are reported separately)
+    rows_lost = source_line_count - total_rows - empty_row_count
 
     result = {
         "status": "success",
@@ -354,6 +367,9 @@ def load_csv(
             f"{rows_lost} rows from the source file were not loaded. "
             "Inspect the raw file for encoding or delimiter issues."
         )
+
+    if empty_row_count > 0:
+        result["empty_rows_removed"] = empty_row_count
 
     return result
 
@@ -846,8 +862,10 @@ def execute_cleaning_plan(
         }
 
     # Save cleaned file next to the original with a _cleaned suffix
+    # Strip any existing _cleaned suffix(es) to avoid stacking them
     old_path = tool_context.state.get("csv_path")
     base, ext = os.path.splitext(old_path)
+    base = _re.sub(r'(_cleaned)+$', '', base)
     cleaned_path = f"{base}_cleaned{ext}"
 
     duckdb.sql(f"COPY data TO '{cleaned_path}' (HEADER, DELIMITER ',')")

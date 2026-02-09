@@ -100,6 +100,7 @@ For each category that has issues, show a table:
 Categories to check (only show those with issues):
 - **Column Normalization** — column names standardized to lowercase with underscores (auto-applied)
 - **Column Overflow** — data shifted into extra columns due to unquoted delimiters (auto-repaired)
+- **Empty Rows** — rows with 100% NULL values across all columns (auto-removed)
 - **Era Extraction** — years with BC/BCE/AD/CE extracted into separate 'era' column (auto-applied)
 - **Mixed Content** — non-numeric values in numeric columns, type pollution
 - **Consistency** — casing inconsistencies, variant spellings
