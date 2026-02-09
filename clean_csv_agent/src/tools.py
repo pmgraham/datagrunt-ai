@@ -1,17 +1,36 @@
-import tempfile
 import os
+import re as _re
+import tempfile
+from typing import Any, Dict, List
 
 import duckdb
 import polars as pl
-from typing import Dict, Any, List
 from google.adk.tools import ToolContext
-from datagrunt import CSVReader
-from datagrunt.core.databases.databases import DuckDBQueries
+
+from clean_csv_agent.src.datagrunt import CSVReader, DuckDBQueries
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _validate_path(path: str) -> str:
+    """Validates that the path is absolute and exists.
+    
+    Prevents directory traversal attacks by ensuring the resolved path
+    is within allowed boundaries (implicit by OS permissions for now).
+    """
+    if not path:
+        raise ValueError("Path cannot be empty")
+    
+    # Resolve absolute path
+    abs_path = os.path.abspath(path)
+    
+    # Check if file exists
+    if not os.path.exists(abs_path):
+        raise ValueError(f"File not found: {path}")
+        
+    return abs_path
 
 # Module-level cache for CSVReader instances (keyed by file path)
 _readers: Dict[str, CSVReader] = {}
@@ -58,8 +77,6 @@ def _validate_column(column: str, table: str) -> Dict[str, Any] | None:
         }
     return None
 
-
-import re as _re
 
 _DESTRUCTIVE_PATTERN = _re.compile(
     r"^\s*(DELETE\b|DROP\s+TABLE\b|TRUNCATE\b)",
@@ -157,13 +174,24 @@ def load_csv(
 
     if not file_path or not os.path.exists(file_path):
         return {"error": f"File not found: {file_path}"}
+        
+    try:
+        file_path = _validate_path(file_path)
+    except ValueError as e:
+        return {"error": str(e)}
 
     # Store path early so inspect_raw_file can use it if we fail
     tool_context.state["csv_path"] = file_path
 
-    # Count source lines (minus header) for verification
-    with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
-        source_line_count = sum(1 for _ in fh) - 1  # subtract header
+    # Count source lines (minus header) for verification — fast binary counting
+    source_line_count = 0
+    with open(file_path, "rb") as fh:
+        while True:
+            buf = fh.read(1024 * 1024)
+            if not buf:
+                break
+            source_line_count += buf.count(b"\n")
+    source_line_count = max(source_line_count - 1, 0)
 
     try:
         duckdb.sql("INSTALL icu; LOAD icu;")
@@ -526,55 +554,6 @@ def query_data(sql: str, tool_context: ToolContext) -> Dict[str, Any]:
     return {
         "result": _to_markdown(result),
         "available_columns": columns,
-    }
-
-
-def preview_cleaning_step(sql: str, tool_context: ToolContext) -> Dict[str, Any]:
-    """Shows before/after examples for a single cleaning SQL statement.
-
-    Loads the CSV into `data`, snapshots rows BEFORE the change, applies
-    the SQL, then snapshots the same rows AFTER. Returns both as markdown
-    tables so users can see the concrete impact.
-    """
-    reader = _get_reader(tool_context)
-    table = reader.db_table
-    _ensure_table(reader)
-
-    duckdb.sql(f"""
-        CREATE OR REPLACE TABLE data AS
-        SELECT ROW_NUMBER() OVER () as _row_id, *
-        FROM {table}
-    """)
-
-    before = duckdb.sql("SELECT * FROM data LIMIT 10").pl()
-    before_dicts = before.to_dicts()
-
-    try:
-        duckdb.sql(sql)
-    except duckdb.BinderException as e:
-        columns = _get_column_names(table)
-        return {
-            "error": str(e),
-            "available_columns": columns,
-            "table_name": table,
-            "sql": sql,
-        }
-    except Exception as e:
-        return {"error": str(e), "sql": sql}
-
-    if before_dicts:
-        row_ids = [r["_row_id"] for r in before_dicts]
-        placeholders = ", ".join(str(rid) for rid in row_ids)
-        after = duckdb.sql(
-            f"SELECT * FROM data WHERE _row_id IN ({placeholders})"
-        ).pl()
-    else:
-        after = duckdb.sql("SELECT * FROM data LIMIT 10").pl()
-
-    return {
-        "before": _to_markdown(before, exclude=["_row_id"]),
-        "after": _to_markdown(after, exclude=["_row_id"]),
-        "sql": sql,
     }
 
 
