@@ -57,8 +57,8 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
           </button>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-auto p-6">
+        {/* Content - scrollable area for both horizontal and vertical */}
+        <div className="flex-1 min-h-0 p-6">
           {loading && (
             <div className="flex items-center justify-center py-12 text-slate-400">
               <div className="animate-spin w-5 h-5 border-2 border-slate-300 border-t-primary-600 rounded-full mr-3" />
@@ -66,7 +66,7 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
             </div>
           )}
           {!loading && data && (
-            <DataTable data={data} totalRows={totalRows} />
+            <DataTable data={data} totalRows={totalRows} fullHeight />
           )}
         </div>
       </div>

@@ -150,6 +150,85 @@ def inspect_raw_file(tool_context: ToolContext) -> Dict[str, Any]:
         return {"error": f"Failed to read raw file: {e}"}
 
 
+def _check_overflow_columns(table: str) -> List[str]:
+    """Check for overflow columns (>80% NULL at the end of the table)."""
+    columns = _get_column_names(table)
+    total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    if total_rows == 0:
+        return []
+
+    sparse_threshold = total_rows * 0.8
+    overflow_cols = []
+
+    for col in reversed(columns):
+        null_count = duckdb.sql(f'''
+            SELECT COUNT(*) - COUNT("{col}") FROM {table}
+        ''').fetchone()[0]
+        if null_count >= sparse_threshold:
+            overflow_cols.insert(0, col)
+        else:
+            break
+
+    return overflow_cols
+
+
+def _normalize_column_names(table: str) -> None:
+    """Normalize column names to lowercase snake_case in place."""
+    cols = duckdb.sql(f"DESCRIBE {table}").pl()
+    renames = []
+    for c in cols.to_dicts():
+        old_name = c['column_name']
+        temp = _re.sub('(.)([A-Z][a-z]+)', r'\1_\2', old_name)
+        new_name = _re.sub('([a-z0-9])([A-Z])', r'\1_\2', temp).lower()
+        new_name = _re.sub('[^a-z0-9_]', '_', new_name)
+        new_name = _re.sub('_+', '_', new_name).strip('_')
+        if not new_name:
+            new_name = f"column_{cols.to_dicts().index(c)}"
+        if new_name != old_name:
+            renames.append((old_name, new_name))
+
+    for old_name, new_name in renames:
+        try:
+            duckdb.sql(f'ALTER TABLE {table} RENAME COLUMN "{old_name}" TO "{new_name}"')
+        except Exception:
+            pass  # Skip if rename fails (e.g., duplicate names)
+
+
+def _try_load_csv(file_path: str, table: str, sep: str, quote: str = '"', escape: str = '"') -> bool:
+    """Try to load CSV with specific quote/escape params. Returns True on success."""
+    try:
+        if quote:
+            duckdb.sql(f"""
+                CREATE OR REPLACE TABLE {table} AS
+                SELECT * FROM read_csv(
+                    '{file_path}',
+                    sep = '{sep}',
+                    quote = '{quote}',
+                    escape = '{escape}',
+                    auto_detect = true,
+                    strict_mode = false,
+                    null_padding = true,
+                    all_varchar = true
+                )
+            """)
+        else:
+            duckdb.sql(f"""
+                CREATE OR REPLACE TABLE {table} AS
+                SELECT * FROM read_csv(
+                    '{file_path}',
+                    sep = '{sep}',
+                    auto_detect = true,
+                    strict_mode = false,
+                    null_padding = true,
+                    all_varchar = true,
+                    ignore_errors = true
+                )
+            """)
+        return True
+    except Exception:
+        return False
+
+
 def load_csv(
     tool_context: ToolContext,
     file_path: str = "",
@@ -157,6 +236,10 @@ def load_csv(
     sep: str = ",",
 ) -> Dict[str, Any]:
     """Loads data into the session for analysis.
+
+    Automatically detects and handles column overflow caused by unquoted
+    delimiters in fields. Tries multiple quote/escape configurations to
+    find the best parsing strategy.
 
     Use file_path for files on disk. If the first attempt fails, use
     inspect_raw_file to find the right 'sep' (e.g. ';' or '\\t') and try again.
@@ -174,7 +257,7 @@ def load_csv(
 
     if not file_path or not os.path.exists(file_path):
         return {"error": f"File not found: {file_path}"}
-        
+
     try:
         file_path = _validate_path(file_path)
     except ValueError as e:
@@ -183,7 +266,7 @@ def load_csv(
     # Store path early so inspect_raw_file can use it if we fail
     tool_context.state["csv_path"] = file_path
 
-    # Count source lines (minus header) for verification — fast binary counting
+    # Count source lines (minus header) for verification
     source_line_count = 0
     with open(file_path, "rb") as fh:
         while True:
@@ -195,55 +278,53 @@ def load_csv(
 
     try:
         duckdb.sql("INSTALL icu; LOAD icu;")
+    except Exception:
+        pass  # Already installed
 
-        reader = CSVReader(file_path, engine="duckdb")
-        _readers[file_path] = reader
+    reader = CSVReader(file_path, engine="duckdb")
+    _readers[file_path] = reader
+    table = reader.db_table
 
-        table = reader.db_table
+    # CSV parsing configurations to try (in order of preference)
+    parse_configs = [
+        {"quote": '"', "escape": '"', "name": "double-quote"},
+        {"quote": '"', "escape": '\\', "name": "backslash-escape"},
+        {"quote": "'", "escape": "'", "name": "single-quote"},
+        {"quote": "", "escape": "", "name": "auto-detect"},
+    ]
 
-        # Load with tolerant flags — never drop rows
-        duckdb.sql(f"""
-            CREATE OR REPLACE TABLE raw_data AS
-            SELECT * FROM read_csv(
-                '{file_path}',
-                sep = '{sep}',
-                auto_detect = true,
-                strict_mode = false,
-                null_padding = true,
-                all_varchar = true
-            )
-        """)
+    best_config = None
+    best_overflow_count = float('inf')
 
-        # Normalize column names to lowercase snake_case
-        cols = duckdb.sql("DESCRIBE raw_data").pl()
-        norm_queries = []
-        for c in cols.to_dicts():
-            old_name = c['column_name']
-            temp = _re.sub('(.)([A-Z][a-z]+)', r'\1_\2', old_name)
-            new_name = _re.sub('([a-z0-9])([A-Z])', r'\1_\2', temp).lower()
-            new_name = _re.sub('[^a-z0-9_]', '_', new_name)
-            new_name = _re.sub('_+', '_', new_name).strip('_')
-            norm_queries.append(f"\"{old_name}\" AS \"{new_name}\"")
+    for config in parse_configs:
+        if not _try_load_csv(file_path, table, sep, config["quote"], config["escape"]):
+            continue
 
-        duckdb.sql(f"""
-            CREATE OR REPLACE TABLE {table} AS
-            SELECT {', '.join(norm_queries)} FROM raw_data
-        """)
-        duckdb.sql("DROP TABLE raw_data")
+        overflow_cols = _check_overflow_columns(table)
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return {
-            "error": f"Could not load data: {e}",
-            "suggestion": "Run 'inspect_raw_file' to see what's wrong with the file format."
-        }
+        if len(overflow_cols) < best_overflow_count:
+            best_overflow_count = len(overflow_cols)
+            best_config = config
 
+            # No overflow = perfect, stop searching
+            if len(overflow_cols) == 0:
+                break
+
+    # If best config isn't already loaded, reload it
+    if best_config and best_config != parse_configs[-1]:
+        _try_load_csv(file_path, table, sep, best_config["quote"], best_config["escape"])
+
+    # Normalize column names
+    _normalize_column_names(table)
+
+    # Final overflow check after normalization
+    final_overflow = _check_overflow_columns(table)
+
+    # Get final stats
     total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     columns = duckdb.sql(f"DESCRIBE {table}").pl().to_dicts()
     sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
 
-    # Verify no rows were lost
     rows_lost = source_line_count - total_rows
 
     result = {
@@ -258,8 +339,18 @@ def load_csv(
         "sample": _to_markdown(sample),
     }
 
-    if rows_lost > 0:
+    if best_config:
+        result["parse_config"] = best_config["name"]
+
+    if len(final_overflow) > 0:
         result["warning"] = (
+            f"Detected {len(final_overflow)} potential overflow columns: {final_overflow}. "
+            "Some rows may have misaligned data due to unquoted delimiters in the source file."
+        )
+        result["overflow_columns"] = final_overflow
+
+    if rows_lost > 0:
+        result["rows_lost_warning"] = (
             f"{rows_lost} rows from the source file were not loaded. "
             "Inspect the raw file for encoding or delimiter issues."
         )
@@ -978,74 +1069,93 @@ def analyze_all_patterns(tool_context: ToolContext) -> Dict[str, Any]:
     whitespace_issues = []
     missing_value_patterns = []
 
+    # Get column types to skip non-text columns for string operations
+    col_types = {row[0]: row[1] for row in duckdb.sql(f"DESCRIBE {table}").fetchall()}
+
     for col in columns:
+        col_type = col_types.get(col, "").upper()
+
+        # Skip boolean and numeric columns for text-based analysis
+        is_text_col = "VARCHAR" in col_type or "TEXT" in col_type or "CHAR" in col_type
+
         # Get unique count to determine if it's a categorical column
         unique_count = duckdb.sql(f'SELECT COUNT(DISTINCT "{col}") FROM {table}').fetchone()[0]
 
-        # Only analyze columns with reasonable cardinality (likely categorical)
-        if unique_count is not None and 1 < unique_count <= 100:
+        # Only analyze text columns with reasonable cardinality (likely categorical)
+        if is_text_col and unique_count is not None and 1 < unique_count <= 100:
             # --- Casing Inconsistencies ---
             # Find values that differ only by case
-            casing_check = duckdb.sql(f"""
-                SELECT LOWER("{col}") as normalized, COUNT(DISTINCT "{col}") as variants
-                FROM {table}
-                WHERE "{col}" IS NOT NULL
-                GROUP BY LOWER("{col}")
-                HAVING COUNT(DISTINCT "{col}") > 1
-                LIMIT 5
-            """).pl().to_dicts()
+            try:
+                casing_check = duckdb.sql(f"""
+                    SELECT LOWER(CAST("{col}" AS VARCHAR)) as normalized, COUNT(DISTINCT "{col}") as variants
+                    FROM {table}
+                    WHERE "{col}" IS NOT NULL
+                    GROUP BY LOWER(CAST("{col}" AS VARCHAR))
+                    HAVING COUNT(DISTINCT "{col}") > 1
+                    LIMIT 5
+                """).pl().to_dicts()
 
-            if casing_check:
-                # Get examples of the variants
-                examples = []
-                for item in casing_check[:3]:
-                    variants = duckdb.sql(f"""
-                        SELECT DISTINCT "{col}" as value FROM {table}
-                        WHERE LOWER("{col}") = '{item["normalized"].replace("'", "''")}'
-                        LIMIT 3
-                    """).pl().to_dicts()
-                    examples.extend([v["value"] for v in variants])
-                casing_issues.append({
-                    "column": col,
-                    "inconsistent_groups": len(casing_check),
-                    "examples": examples[:5],
-                })
+                if casing_check:
+                    # Get examples of the variants
+                    examples = []
+                    for item in casing_check[:3]:
+                        variants = duckdb.sql(f"""
+                            SELECT DISTINCT "{col}" as value FROM {table}
+                            WHERE LOWER(CAST("{col}" AS VARCHAR)) = '{item["normalized"].replace("'", "''")}'
+                            LIMIT 3
+                        """).pl().to_dicts()
+                        examples.extend([v["value"] for v in variants])
+                    casing_issues.append({
+                        "column": col,
+                        "inconsistent_groups": len(casing_check),
+                        "examples": examples[:5],
+                    })
+            except Exception:
+                pass  # Skip columns that can't be analyzed
 
-        # --- Whitespace Issues ---
-        whitespace_count = duckdb.sql(f"""
-            SELECT COUNT(*) FROM {table}
-            WHERE "{col}" IS NOT NULL
-              AND (
-                "{col}" != TRIM("{col}")
-                OR "{col}" LIKE '%  %'
-              )
-        """).fetchone()[0]
+        # --- Whitespace Issues (only for text columns) ---
+        if is_text_col:
+            try:
+                whitespace_count = duckdb.sql(f"""
+                    SELECT COUNT(*) FROM {table}
+                    WHERE "{col}" IS NOT NULL
+                      AND (
+                        CAST("{col}" AS VARCHAR) != TRIM(CAST("{col}" AS VARCHAR))
+                        OR CAST("{col}" AS VARCHAR) LIKE '%  %'
+                      )
+                """).fetchone()[0]
 
-        if whitespace_count and whitespace_count > 0:
-            whitespace_issues.append({
-                "column": col,
-                "affected_rows": whitespace_count,
-            })
+                if whitespace_count and whitespace_count > 0:
+                    whitespace_issues.append({
+                        "column": col,
+                        "affected_rows": whitespace_count,
+                    })
+            except Exception:
+                pass
 
-        # --- Missing Value Patterns (N/A, empty strings, etc.) ---
-        missing_patterns = duckdb.sql(f"""
-            SELECT "{col}" as value, COUNT(*) as count
-            FROM {table}
-            WHERE "{col}" IS NOT NULL
-              AND (
-                LOWER(TRIM("{col}")) IN ('n/a', 'na', 'null', 'none', '-', '--', 'unknown', '')
-                OR "{col}" = ''
-              )
-            GROUP BY 1
-            ORDER BY 2 DESC
-            LIMIT 5
-        """).pl().to_dicts()
+        # --- Missing Value Patterns (N/A, empty strings, etc.) - only text columns ---
+        if is_text_col:
+            try:
+                missing_patterns = duckdb.sql(f"""
+                    SELECT CAST("{col}" AS VARCHAR) as value, COUNT(*) as count
+                    FROM {table}
+                    WHERE "{col}" IS NOT NULL
+                      AND (
+                        LOWER(TRIM(CAST("{col}" AS VARCHAR))) IN ('n/a', 'na', 'null', 'none', '-', '--', 'unknown', '')
+                        OR CAST("{col}" AS VARCHAR) = ''
+                      )
+                    GROUP BY 1
+                    ORDER BY 2 DESC
+                    LIMIT 5
+                """).pl().to_dicts()
 
-        if missing_patterns:
-            missing_value_patterns.append({
-                "column": col,
-                "patterns": missing_patterns,
-            })
+                if missing_patterns:
+                    missing_value_patterns.append({
+                        "column": col,
+                        "patterns": missing_patterns,
+                    })
+            except Exception:
+                pass
 
     return {
         "total_rows": total_rows,
@@ -1171,32 +1281,33 @@ def detect_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
 
 
 def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
-    """Repairs column overflow by removing extra columns and flagging affected rows.
+    """Repairs column overflow by reloading the CSV with proper quote/escape handling.
 
-    When a CSV field contains unquoted delimiters, data shifts right into extra
-    columns. This tool:
+    When a CSV field contains commas (e.g., "Punjab, Haryana"), it should be
+    quoted. If the initial load didn't handle quotes properly, data shifts
+    into extra columns.
 
+    This tool:
     1. Identifies overflow columns (sparse columns at the end)
-    2. Flags rows that have data in overflow columns with 'is_shifted = true'
-    3. Drops the overflow columns
-
-    Rows marked is_shifted=true may have misaligned data and should be reviewed.
-    The tool preserves data integrity by not guessing at realignment.
+    2. Reloads the CSV with proper quote/escape parameters
+    3. Compares the new load - if it has fewer columns, use it
+    4. Tries multiple parsing strategies until one works
 
     No parameters needed - automatically detects and repairs overflow.
 
     Returns:
-        Result with before/after samples and repair statistics.
+        Result with before/after comparison and repair statistics.
     """
     reader = _get_reader(tool_context)
     table = reader.db_table
     _ensure_table(reader)
 
+    csv_path = tool_context.state.get("csv_path")
+    if not csv_path:
+        return {"error": "No CSV path found in session state."}
+
     columns = _get_column_names(table)
     total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-
-    # Snapshot before
-    before_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 10").pl()
 
     # Step 1: Identify overflow columns (>80% NULL and at the end)
     null_counts = {}
@@ -1222,74 +1333,188 @@ def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
             "columns": columns,
         }
 
-    # Step 2: Find the real columns (before overflow)
-    first_overflow_idx = columns.index(overflow_cols[0])
-    if first_overflow_idx == 0:
+    original_col_count = len(columns)
+    original_overflow_count = len(overflow_cols)
+
+    # Snapshot before
+    before_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+
+    # Step 2: Try reloading with different quote/escape configurations
+    parse_configs = [
+        # Config 1: Standard CSV with double-quote
+        {"quote": '"', "escape": '"', "name": "double-quote escaped"},
+        # Config 2: Double-quote with backslash escape
+        {"quote": '"', "escape": '\\', "name": "backslash escaped"},
+        # Config 3: Single quote
+        {"quote": "'", "escape": "'", "name": "single-quote"},
+        # Config 4: No quoting, ignore errors
+        {"quote": '', "escape": '', "name": "no quotes"},
+    ]
+
+    best_result = None
+    best_overflow_count = original_overflow_count
+
+    for config in parse_configs:
+        try:
+            # Load into a test table
+            if config["quote"]:
+                load_query = f"""
+                    CREATE OR REPLACE TABLE {table}_test AS
+                    SELECT * FROM read_csv(
+                        '{csv_path}',
+                        auto_detect = true,
+                        quote = '{config["quote"]}',
+                        escape = '{config["escape"]}',
+                        strict_mode = false,
+                        null_padding = true,
+                        all_varchar = true
+                    )
+                """
+            else:
+                # No quote character - let DuckDB auto-detect
+                load_query = f"""
+                    CREATE OR REPLACE TABLE {table}_test AS
+                    SELECT * FROM read_csv(
+                        '{csv_path}',
+                        auto_detect = true,
+                        strict_mode = false,
+                        null_padding = true,
+                        all_varchar = true,
+                        ignore_errors = true
+                    )
+                """
+
+            duckdb.sql(load_query)
+
+            # Check the new table's column count and overflow
+            test_columns = _get_column_names(f"{table}_test")
+            test_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}_test").fetchone()[0]
+
+            # Count overflow in test table
+            test_null_counts = {}
+            for col in test_columns:
+                result = duckdb.sql(f'''
+                    SELECT COUNT(*) - COUNT("{col}") as null_count
+                    FROM {table}_test
+                ''').fetchone()
+                test_null_counts[col] = result[0]
+
+            test_sparse_threshold = test_rows * 0.8
+            test_overflow = []
+            for col in reversed(test_columns):
+                if test_null_counts[col] >= test_sparse_threshold:
+                    test_overflow.insert(0, col)
+                else:
+                    break
+
+            # If this config has fewer overflow columns, it's better
+            if len(test_overflow) < best_overflow_count:
+                best_overflow_count = len(test_overflow)
+                best_result = {
+                    "config": config,
+                    "columns": test_columns,
+                    "overflow": test_overflow,
+                    "rows": test_rows,
+                }
+
+                # If no overflow, we found the fix
+                if len(test_overflow) == 0:
+                    break
+
+        except Exception as e:
+            # This config didn't work, try next
+            continue
+        finally:
+            # Clean up test table if we're not using it
+            if best_result is None or best_result["config"] != config:
+                duckdb.sql(f"DROP TABLE IF EXISTS {table}_test")
+
+    # Step 3: Apply the best result
+    if best_result and best_overflow_count < original_overflow_count:
+        # Normalize column names in the new table
+        test_columns = _get_column_names(f"{table}_test")
+        norm_parts = []
+        for col in test_columns:
+            new_name = col.lower()
+            new_name = _re.sub(r'[\s\-]+', '_', new_name)
+            new_name = _re.sub(r'[^a-z0-9_]', '', new_name)
+            new_name = _re.sub(r'_+', '_', new_name)
+            new_name = new_name.strip('_')
+            if new_name and new_name[0].isdigit():
+                new_name = f"col_{new_name}"
+            if not new_name:
+                new_name = f"column_{test_columns.index(col)}"
+            norm_parts.append(f'"{col}" AS "{new_name}"')
+
+        duckdb.sql(f"""
+            CREATE OR REPLACE TABLE {table}_normalized AS
+            SELECT {', '.join(norm_parts)}
+            FROM {table}_test
+        """)
+
+        # Replace original table
+        duckdb.sql(f"DROP TABLE IF EXISTS {table}")
+        duckdb.sql(f"DROP TABLE IF EXISTS {table}_test")
+        duckdb.sql(f"ALTER TABLE {table}_normalized RENAME TO {table}")
+
+        after_columns = _get_column_names(table)
+        after_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+
         return {
-            "error": "Cannot repair - all columns appear to be overflow columns.",
-            "columns": columns,
+            "repaired": True,
+            "method": f"Reloaded CSV with {best_result['config']['name']} parsing",
+            "columns_before": original_col_count,
+            "columns_after": len(after_columns),
+            "overflow_before": original_overflow_count,
+            "overflow_after": best_overflow_count,
+            "rows": best_result["rows"],
+            "new_schema": after_columns,
+            "before_sample": _to_markdown(before_sample),
+            "after_sample": _to_markdown(after_sample),
         }
 
+    # Cleanup
+    duckdb.sql(f"DROP TABLE IF EXISTS {table}_test")
+
+    # No config improved things - just remove overflow columns and flag rows
+    first_overflow_idx = columns.index(overflow_cols[0])
     real_columns = columns[:first_overflow_idx]
 
-    # Step 3: Build expression to detect rows with overflow data
     overflow_check_expr = " OR ".join([
-        f'("{col}" IS NOT NULL AND TRIM("{col}") != \'\')'
+        f'("{col}" IS NOT NULL AND TRIM(CAST("{col}" AS VARCHAR)) != \'\')'
         for col in overflow_cols
     ])
 
-    # Count affected rows
     shifted_count = duckdb.sql(f"""
         SELECT COUNT(*) FROM {table}
         WHERE {overflow_check_expr}
     """).fetchone()[0]
 
-    # Step 4: Create repaired table with only real columns + is_shifted flag
     real_cols_select = ", ".join([f'"{col}"' for col in real_columns])
-
-    repair_query = f'''
-        CREATE OR REPLACE TABLE {table}_repaired AS
+    duckdb.sql(f'''
+        CREATE OR REPLACE TABLE {table}_cleaned AS
         SELECT
             {real_cols_select},
             CASE WHEN ({overflow_check_expr}) THEN true ELSE false END as is_shifted
         FROM {table}
-    '''
+    ''')
 
-    try:
-        duckdb.sql(repair_query)
-    except Exception as e:
-        return {
-            "error": f"Failed to repair overflow: {str(e)}",
-            "query": repair_query,
-        }
-
-    # Replace original table
     duckdb.sql(f"DROP TABLE IF EXISTS {table}")
-    duckdb.sql(f"ALTER TABLE {table}_repaired RENAME TO {table}")
+    duckdb.sql(f"ALTER TABLE {table}_cleaned RENAME TO {table}")
 
-    # Validate
-    after_count = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-    new_columns = _get_column_names(table)
-
-    # Get sample including some shifted rows
-    after_sample = duckdb.sql(f"""
-        (SELECT * FROM {table} WHERE is_shifted = true LIMIT 3)
-        UNION ALL
-        (SELECT * FROM {table} WHERE is_shifted = false LIMIT 3)
-    """).pl()
+    after_columns = _get_column_names(table)
+    after_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
 
     return {
-        "repaired": True,
-        "overflow_columns_removed": overflow_cols,
-        "columns_before": len(columns),
-        "columns_after": len(new_columns),
-        "columns_removed": len(overflow_cols),
+        "repaired": False,
+        "message": "Could not fix overflow by re-parsing. Removed overflow columns and flagged affected rows.",
+        "columns_before": original_col_count,
+        "columns_after": len(after_columns),
         "rows_flagged": shifted_count,
-        "rows_total": after_count,
-        "new_schema": new_columns,
+        "new_schema": after_columns,
         "before_sample": _to_markdown(before_sample),
         "after_sample": _to_markdown(after_sample),
-        "note": f"Removed {len(overflow_cols)} overflow columns. Flagged {shifted_count} rows with is_shifted=true that had data in overflow columns - these rows may have misaligned data and should be reviewed.",
+        "note": f"Flagged {shifted_count} rows with is_shifted=true that may have data alignment issues.",
     }
 
 
