@@ -10,11 +10,15 @@ import { isReportMessage, deduplicateReport } from '../utils';
 interface CanvasProps {
   messages: ChatMessage[];
   onClose: () => void;
+  onSendMessage: (text: string) => void;
+  isAgentRunning: boolean;
 }
 
 export const Canvas: React.FC<CanvasProps> = ({
   messages,
   onClose,
+  onSendMessage,
+  isAgentRunning,
 }) => {
   const [previewData, setPreviewData] = useState<CleanedDataRow[] | null>(null);
   const [totalRows, setTotalRows] = useState(0);
@@ -43,16 +47,23 @@ export const Canvas: React.FC<CanvasProps> = ({
     return messages.some((m) => !!m.downloadableFile);
   }, [messages]);
 
-  const loadData = useCallback(async () => {
-    if (dataLoaded || loadingPreview) return;
+  const loadData = useCallback(async (force = false) => {
+    if ((!force && dataLoaded) || loadingPreview) return;
 
     setLoadingPreview(true);
-    const result = await fetchPreviewRows('data', 100, 0);
-    setPreviewData(result.rows);
-    setTotalRows(result.total);
-    setDataLoaded(true);
-    setLoadingPreview(false);
+    try {
+      const result = await fetchPreviewRows('data', 100, 0);
+      setPreviewData(result.rows);
+      setTotalRows(result.total);
+      setDataLoaded(true);
+    } finally {
+      setLoadingPreview(false);
+    }
   }, [dataLoaded, loadingPreview]);
+
+  const refreshData = useCallback(() => {
+    loadData(true);
+  }, [loadData]);
 
   useEffect(() => {
     if (isDataModalOpen && !dataLoaded) {
@@ -146,6 +157,10 @@ export const Canvas: React.FC<CanvasProps> = ({
         data={previewData}
         totalRows={totalRows}
         loading={loadingPreview}
+        onSendMessage={onSendMessage}
+        isAgentRunning={isAgentRunning}
+        messages={messages}
+        onRefreshData={refreshData}
       />
     </div>
   );
