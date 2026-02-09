@@ -50,6 +50,26 @@ Each specialist processes all columns in a single tool call (O(1) LLM round-trip
 
 ### Backend Setup
 
+#### Using uv (Recommended)
+
+```bash
+cd clean_csv_agent
+
+# Create virtual environment and install dependencies
+uv venv --python 3.13
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+uv pip install -r requirements.txt
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your credentials (see Configuration below)
+
+# Start the server
+python -m uvicorn clean_csv_agent.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+#### Using pip
+
 ```bash
 cd clean_csv_agent
 
