@@ -10,11 +10,15 @@ import { isReportMessage, deduplicateReport } from '../utils';
 interface CanvasProps {
   messages: ChatMessage[];
   onClose: () => void;
+  onSendMessage: (text: string) => void;
+  isAgentRunning: boolean;
 }
 
 export const Canvas: React.FC<CanvasProps> = ({
   messages,
   onClose,
+  onSendMessage,
+  isAgentRunning,
 }) => {
   const [previewData, setPreviewData] = useState<CleanedDataRow[] | null>(null);
   const [totalRows, setTotalRows] = useState(0);
@@ -146,6 +150,8 @@ export const Canvas: React.FC<CanvasProps> = ({
         data={previewData}
         totalRows={totalRows}
         loading={loadingPreview}
+        onSendMessage={onSendMessage}
+        isAgentRunning={isAgentRunning}
       />
     </div>
   );
