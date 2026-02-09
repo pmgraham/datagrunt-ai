@@ -5,7 +5,6 @@ import re
 class CSVReader:
     """
     A simple wrapper around DuckDB for reading CSV files.
-    Replaces the missing datagrunt.CSVReader class.
     """
     def __init__(self, filepath: str, engine: str = "duckdb"):
         self.filepath = filepath
@@ -40,7 +39,6 @@ class CSVReader:
 class DuckDBQueries:
     """
     Helper for generating DuckDB queries.
-    Replaces the missing datagrunt.core.databases.databases.DuckDBQueries class.
     """
     def __init__(self, filepath: str):
         self.filepath = filepath
