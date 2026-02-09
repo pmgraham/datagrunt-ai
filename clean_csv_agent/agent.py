@@ -28,6 +28,10 @@ DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", DEFAULT_MODEL_FALLBACK)
 
 profiler_agent = Agent(
     name="Profiler",
+    description=(
+        "Analyzes CSV structure and schema. Returns column types, statistics, "
+        "and type coercion recommendations for each column."
+    ),
     model=os.getenv("PROFILER_MODEL", DEFAULT_MODEL),
     instruction=PROFILER_PROMPT,
     tools=[
@@ -38,6 +42,10 @@ profiler_agent = Agent(
 
 auditor_agent = Agent(
     name="Auditor",
+    description=(
+        "Audits data quality issues. Detects type pollution (text in numeric columns), "
+        "statistical outliers via IQR, and mixed date formats."
+    ),
     model=os.getenv("AUDITOR_MODEL", DEFAULT_MODEL),
     instruction=AUDITOR_PROMPT,
     tools=[
@@ -49,6 +57,10 @@ auditor_agent = Agent(
 
 pattern_agent = Agent(
     name="PatternExpert",
+    description=(
+        "Identifies consistency issues and patterns. Analyzes value distributions, "
+        "checks logical relationships between columns, and finds whitespace issues."
+    ),
     model=os.getenv("PATTERN_EXPERT_MODEL", DEFAULT_MODEL),
     instruction=PATTERN_PROMPT,
     tools=[
@@ -64,6 +76,11 @@ pattern_agent = Agent(
 
 root_agent = Agent(
     name="DataGruntScientist",
+    description=(
+        "CSV cleaning assistant. Loads CSV files, detects structural issues "
+        "(column overflow, era designations), coordinates specialized agents "
+        "for profiling and auditing, then proposes and executes cleaning plans."
+    ),
     model=os.getenv("COORDINATOR_MODEL", DEFAULT_MODEL),
     instruction=COORDINATOR_PROMPT,
     tools=[
@@ -74,6 +91,9 @@ root_agent = Agent(
         FunctionTool(func=tools.inspect_raw_file),
         FunctionTool(func=tools.detect_column_overflow),
         FunctionTool(func=tools.repair_column_overflow),
+        FunctionTool(func=tools.detect_era_in_years),
+        FunctionTool(func=tools.extract_era_column),
+        FunctionTool(func=tools.normalize_column_names),
         FunctionTool(func=tools.preview_full_plan),
         FunctionTool(func=tools.execute_cleaning_plan),
         FunctionTool(func=tools.validate_cleaned_data),

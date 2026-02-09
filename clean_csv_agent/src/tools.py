@@ -891,169 +891,382 @@ def detect_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
     return findings
 
 
-def repair_column_overflow(
-    anchor_column: str,
-    expected_columns: List[str],
-    tool_context: ToolContext
-) -> Dict[str, Any]:
-    """Repairs column overflow by reconstructing shifted data.
+def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
+    """Automatically repairs column overflow by merging shifted data.
 
-    When a CSV field contains unquoted delimiters, data shifts into extra columns.
-    This tool reconstructs the original structure by:
+    When a CSV field contains unquoted delimiters, data shifts into extra columns
+    (usually named column12, column13, etc. or mostly NULL). This tool:
 
-    1. Concatenating all columns from anchor_column to the end
-    2. Using regex to properly parse quoted vs unquoted fields
-    3. Mapping extracted fields back to the expected schema
-    4. Dropping the empty overflow columns
+    1. Identifies overflow columns (sparse columns at the end)
+    2. For rows with overflow, merges the overflow values back into the last
+       "real" column before the overflow started
+    3. Drops the empty overflow columns
 
-    Args:
-        anchor_column: The column where overflow begins (text-heavy field)
-        expected_columns: List of column names that SHOULD exist after anchor
-                         (e.g., ['outcome', 'status', 'is_duplicate'])
+    No parameters needed - automatically detects and repairs overflow.
 
     Returns:
-        Result with before/after samples and validation metrics.
+        Result with before/after samples and repair statistics.
     """
     reader = _get_reader(tool_context)
     table = reader.db_table
     _ensure_table(reader)
 
     columns = _get_column_names(table)
-
-    # Validate anchor column exists
-    if anchor_column not in columns:
-        return {
-            "error": f"Anchor column '{anchor_column}' not found",
-            "available_columns": columns,
-        }
-
-    anchor_idx = columns.index(anchor_column)
-    columns_before_anchor = columns[:anchor_idx]
-    columns_from_anchor = columns[anchor_idx:]
+    total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
     # Snapshot before
     before_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
 
-    # Create the concatenated string from anchor to end
-    concat_parts = [f'COALESCE(CAST("{col}" AS VARCHAR), \'\')' for col in columns_from_anchor]
-    concat_expr = " || ',' || ".join(concat_parts)
+    # Step 1: Identify overflow columns (>80% NULL and at the end)
+    null_counts = {}
+    for col in columns:
+        result = duckdb.sql(f'''
+            SELECT COUNT(*) - COUNT("{col}") as null_count
+            FROM {table}
+        ''').fetchone()
+        null_counts[col] = result[0]
 
-    # Use DuckDB's regexp_extract_all to parse respecting quotes
-    # Pattern: Match either "quoted content" or non-comma content
-    parse_query = f'''
+    sparse_threshold = total_rows * 0.8
+    overflow_cols = []
+    for col in reversed(columns):
+        if null_counts[col] >= sparse_threshold:
+            overflow_cols.insert(0, col)
+        else:
+            break
+
+    if not overflow_cols:
+        return {
+            "repaired": False,
+            "message": "No overflow columns detected (no sparse columns at end of table).",
+            "columns": columns,
+        }
+
+    # Step 2: Find the anchor column (last real column before overflow)
+    first_overflow_idx = columns.index(overflow_cols[0])
+    if first_overflow_idx == 0:
+        return {
+            "error": "Cannot repair - all columns appear to be overflow columns.",
+            "columns": columns,
+        }
+
+    anchor_column = columns[first_overflow_idx - 1]
+    keep_columns = columns[:first_overflow_idx]
+
+    # Step 3: For each row, merge overflow values back into the anchor column
+    # Build a query that concatenates non-null overflow values
+    overflow_concat_parts = []
+    for col in overflow_cols:
+        overflow_concat_parts.append(f'COALESCE("{col}", \'\')')
+
+    overflow_concat = " || ', ' || ".join(overflow_concat_parts)
+
+    # Create repaired table
+    keep_cols_select = ", ".join([f'"{col}"' for col in keep_columns[:-1]])  # All except anchor
+
+    # For the anchor column, append overflow data if any exists
+    repair_query = f'''
+        CREATE OR REPLACE TABLE {table}_repaired AS
         SELECT
-            {", ".join([f'"{col}"' for col in columns_before_anchor])},
-            regexp_extract_all({concat_expr}, '("(?:[^"]|"")*"|[^,]*)') as parsed_fields
+            {keep_cols_select + ',' if keep_cols_select else ''}
+            CASE
+                WHEN ({overflow_concat}) != '' AND ({overflow_concat}) != ', , , , , , '
+                THEN COALESCE("{anchor_column}", '') || ', ' ||
+                     regexp_replace(
+                         regexp_replace({overflow_concat}, '^[, ]+', ''),
+                         '[, ]+$', ''
+                     )
+                ELSE "{anchor_column}"
+            END as "{anchor_column}"
         FROM {table}
     '''
 
     try:
-        parsed = duckdb.sql(parse_query).pl()
+        duckdb.sql(repair_query)
     except Exception as e:
         return {
-            "error": f"Failed to parse overflow: {str(e)}",
-            "query": parse_query,
+            "error": f"Failed to repair overflow: {str(e)}",
+            "query": repair_query,
         }
-
-    # Determine how many fields we expect after the anchor
-    # anchor_column + expected_columns
-    expected_field_count = 1 + len(expected_columns)
-
-    # Build the reconstruction query
-    # We need to handle cases where there are more parsed fields than expected
-    # by concatenating excess fields into the anchor column
-
-    reconstruction_cases = []
-    for i, row in enumerate(parsed.to_dicts()):
-        fields = row.get("parsed_fields", [])
-        # Clean up fields - remove surrounding quotes
-        cleaned = []
-        for f in fields:
-            if f and f.startswith('"') and f.endswith('"'):
-                cleaned.append(f[1:-1].replace('""', '"'))
-            else:
-                cleaned.append(f if f else None)
-
-        # If more fields than expected, merge extras into anchor
-        if len(cleaned) > expected_field_count:
-            excess = len(cleaned) - expected_field_count
-            anchor_parts = cleaned[:excess + 1]
-            anchor_value = ", ".join([p for p in anchor_parts if p])
-            final_fields = [anchor_value] + cleaned[excess + 1:]
-        else:
-            final_fields = cleaned
-
-        reconstruction_cases.append(final_fields)
-
-    # Create new table with corrected structure
-    new_columns = columns_before_anchor + [anchor_column] + expected_columns
-
-    # Build VALUES clause for the corrected data
-    # This is a simplified approach - for large datasets we'd use a different method
-    rows_data = []
-    original_data = duckdb.sql(f"SELECT * FROM {table}").pl().to_dicts()
-
-    for i, orig_row in enumerate(original_data):
-        new_row = {}
-        # Copy columns before anchor
-        for col in columns_before_anchor:
-            new_row[col] = orig_row[col]
-
-        # Get parsed fields for this row
-        if i < len(reconstruction_cases):
-            fields = reconstruction_cases[i]
-            # Map to new columns
-            for j, col in enumerate([anchor_column] + expected_columns):
-                if j < len(fields):
-                    new_row[col] = fields[j]
-                else:
-                    new_row[col] = None
-        rows_data.append(new_row)
-
-    # Create new table
-    # First create empty table with correct schema
-    col_defs = ", ".join([f'"{col}" VARCHAR' for col in new_columns])
-    duckdb.sql(f"CREATE OR REPLACE TABLE {table}_repaired ({col_defs})")
-
-    # Insert data
-    if rows_data:
-        # Use parameterized insert for safety
-        placeholders = ", ".join(["?" for _ in new_columns])
-        insert_sql = f'INSERT INTO {table}_repaired VALUES ({placeholders})'
-
-        for row in rows_data:
-            values = [row.get(col) for col in new_columns]
-            duckdb.execute(insert_sql, values)
 
     # Replace original table
     duckdb.sql(f"DROP TABLE IF EXISTS {table}")
     duckdb.sql(f"ALTER TABLE {table}_repaired RENAME TO {table}")
 
-    # Validate: check row count preserved and value variance eliminated
+    # Validate
     after_count = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     after_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+    new_columns = _get_column_names(table)
 
-    # Check value variance after repair
-    new_columns_list = _get_column_names(table)
-    count_exprs = " + ".join([f'CASE WHEN "{col}" IS NOT NULL THEN 1 ELSE 0 END' for col in new_columns_list])
-    variance_after = duckdb.sql(f'''
-        SELECT
-            ({count_exprs}) as non_null_count,
-            COUNT(*) as row_count
+    return {
+        "repaired": True,
+        "anchor_column": anchor_column,
+        "overflow_columns_removed": overflow_cols,
+        "columns_before": len(columns),
+        "columns_after": len(new_columns),
+        "columns_removed": len(overflow_cols),
+        "rows_processed": after_count,
+        "new_schema": new_columns,
+        "before_sample": _to_markdown(before_sample),
+        "after_sample": _to_markdown(after_sample),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Era Detection and Column Normalization
+# ---------------------------------------------------------------------------
+
+# Pattern to match years with era designations
+_ERA_PATTERN = _re.compile(
+    r'^\s*(\d+)\s*(BC|BCE|AD|CE|B\.C\.|B\.C\.E\.|A\.D\.|C\.E\.)\s*$',
+    _re.IGNORECASE
+)
+
+# Pattern for era at the start (e.g., "AD 2000")
+_ERA_PREFIX_PATTERN = _re.compile(
+    r'^\s*(BC|BCE|AD|CE|B\.C\.|B\.C\.E\.|A\.D\.|C\.E\.)\s*(\d+)\s*$',
+    _re.IGNORECASE
+)
+
+
+def detect_era_in_years(column: str, tool_context: ToolContext) -> Dict[str, Any]:
+    """Detects if a column contains years with era designations (BC, BCE, AD, CE).
+
+    Checks for patterns like:
+    - "2000 BC", "500 BCE", "1066 AD", "2024 CE"
+    - "BC 2000", "AD 1066" (era prefix)
+    - Variations with periods: "B.C.", "A.D.", etc.
+
+    Args:
+        column: The column name to check for era patterns.
+
+    Returns:
+        Detection results including affected rows and era distribution.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    col_error = _validate_column(column, table)
+    if col_error:
+        return col_error
+
+    # Get all values from the column
+    values = duckdb.sql(f'SELECT "{column}" FROM {table} WHERE "{column}" IS NOT NULL').pl()
+
+    era_rows = []
+    era_distribution = {"BC": 0, "BCE": 0, "AD": 0, "CE": 0}
+
+    for row in values.to_dicts():
+        val = str(row[column]).strip()
+
+        # Check suffix pattern (e.g., "2000 BC")
+        match = _ERA_PATTERN.match(val)
+        if match:
+            year, era = match.groups()
+            normalized_era = era.upper().replace(".", "")
+            if normalized_era in ("BC", "BCE"):
+                era_distribution["BC"] += 1
+            else:
+                era_distribution["AD"] += 1
+            era_rows.append({"value": val, "year": year, "era": normalized_era})
+            continue
+
+        # Check prefix pattern (e.g., "AD 2000")
+        match = _ERA_PREFIX_PATTERN.match(val)
+        if match:
+            era, year = match.groups()
+            normalized_era = era.upper().replace(".", "")
+            if normalized_era in ("BC", "BCE"):
+                era_distribution["BC"] += 1
+            else:
+                era_distribution["AD"] += 1
+            era_rows.append({"value": val, "year": year, "era": normalized_era})
+
+    total_rows = len(values)
+    era_count = len(era_rows)
+
+    if era_count == 0:
+        return {
+            "era_detected": False,
+            "column": column,
+            "message": "No era designations found in this column.",
+        }
+
+    return {
+        "era_detected": True,
+        "column": column,
+        "total_rows": total_rows,
+        "rows_with_era": era_count,
+        "percentage": round(era_count / total_rows * 100, 1) if total_rows > 0 else 0,
+        "era_distribution": {k: v for k, v in era_distribution.items() if v > 0},
+        "samples": era_rows[:10],
+        "recommendation": f"Extract era into separate 'era' column and keep numeric year in '{column}'",
+    }
+
+
+def extract_era_column(column: str, tool_context: ToolContext) -> Dict[str, Any]:
+    """Extracts era designations from a year column into a separate 'era' column.
+
+    Transforms values like "2000 BC" into:
+    - Original column: 2000 (numeric year)
+    - New 'era' column: "BC" (preserves original text exactly)
+
+    IMPORTANT: Era values are preserved exactly as they appear in the source data.
+    If the original says "BC", the era column will say "BC" (not normalized to "BCE").
+    This is a cleaning operation, not an enrichment operation.
+
+    Args:
+        column: The column containing years with era designations.
+
+    Returns:
+        Result with before/after samples showing the transformation.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    col_error = _validate_column(column, table)
+    if col_error:
+        return col_error
+
+    # Check if era column already exists
+    columns = _get_column_names(table)
+    era_col_name = "era"
+    if era_col_name in columns:
+        era_col_name = f"{column}_era"
+
+    # Snapshot before
+    before_sample = duckdb.sql(f'SELECT * FROM {table} LIMIT 5').pl()
+
+    # Add the era column
+    duckdb.sql(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{era_col_name}" VARCHAR')
+
+    # Extract era exactly as it appears in the data (preserve original text)
+    # Handle suffix patterns (e.g., "2000 BC", "1500 B.C.E.")
+    duckdb.sql(f'''
+        UPDATE {table}
+        SET "{era_col_name}" = TRIM(regexp_extract("{column}", '(?i)(BCE?|B\\.C\\.E?\\.?|CE|AD|A\\.D\\.?|C\\.E\\.?)\\s*$', 1))
+        WHERE "{column}" IS NOT NULL
+          AND regexp_matches("{column}", '(?i)(BCE?|B\\.C\\.E?\\.?|CE|AD|A\\.D\\.?|C\\.E\\.?)\\s*$')
+    ''')
+
+    # Handle prefix patterns (e.g., "AD 2000", "B.C. 500")
+    duckdb.sql(f'''
+        UPDATE {table}
+        SET "{era_col_name}" = TRIM(regexp_extract("{column}", '(?i)^\\s*(BCE?|B\\.C\\.E?\\.?|CE|AD|A\\.D\\.?|C\\.E\\.?)\\s+', 1))
+        WHERE "{column}" IS NOT NULL
+          AND "{era_col_name}" IS NULL
+          AND regexp_matches("{column}", '(?i)^\\s*(BCE?|B\\.C\\.E?\\.?|CE|AD|A\\.D\\.?|C\\.E\\.?)\\s+\\d')
+    ''')
+
+    # Extract just the numeric year (only for rows where we found an era)
+    duckdb.sql(f'''
+        UPDATE {table}
+        SET "{column}" = regexp_extract("{column}", '(\\d+)', 1)
+        WHERE "{era_col_name}" IS NOT NULL AND "{era_col_name}" != ''
+    ''')
+
+    # Get stats
+    era_counts = duckdb.sql(f'''
+        SELECT "{era_col_name}" as era, COUNT(*) as count
         FROM {table}
-        GROUP BY non_null_count
+        WHERE "{era_col_name}" IS NOT NULL
+        GROUP BY "{era_col_name}"
     ''').pl()
 
-    variance_reduced = len(variance_after) == 1
+    after_sample = duckdb.sql(f'SELECT * FROM {table} LIMIT 5').pl()
+
+    rows_updated = duckdb.sql(f'''
+        SELECT COUNT(*) FROM {table} WHERE "{era_col_name}" IS NOT NULL
+    ''').fetchone()[0]
 
     return {
         "success": True,
-        "rows_processed": after_count,
-        "columns_before": len(columns),
-        "columns_after": len(new_columns_list),
-        "columns_removed": len(columns) - len(new_columns_list),
-        "variance_eliminated": variance_reduced,
-        "new_schema": new_columns_list,
+        "column": column,
+        "era_column_created": era_col_name,
+        "rows_updated": rows_updated,
+        "era_distribution": era_counts.to_dicts() if not era_counts.is_empty() else [],
         "before_sample": _to_markdown(before_sample),
         "after_sample": _to_markdown(after_sample),
+    }
+
+
+def normalize_column_names(tool_context: ToolContext) -> Dict[str, Any]:
+    """Normalizes all column names to a consistent format.
+
+    Transformations applied:
+    - Convert to lowercase
+    - Replace spaces with underscores
+    - Remove special characters (except underscores)
+    - Collapse multiple underscores to single
+    - Remove leading/trailing underscores
+    - Ensure names don't start with a digit
+
+    Returns:
+        Mapping of old names to new names and the updated schema.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    columns = _get_column_names(table)
+    renames = {}
+
+    for col in columns:
+        # Normalize the column name
+        new_name = col.lower()
+        # Replace spaces and hyphens with underscores
+        new_name = _re.sub(r'[\s\-]+', '_', new_name)
+        # Remove special characters except underscores
+        new_name = _re.sub(r'[^a-z0-9_]', '', new_name)
+        # Collapse multiple underscores
+        new_name = _re.sub(r'_+', '_', new_name)
+        # Remove leading/trailing underscores
+        new_name = new_name.strip('_')
+        # Ensure doesn't start with digit
+        if new_name and new_name[0].isdigit():
+            new_name = f"col_{new_name}"
+        # Handle empty names
+        if not new_name:
+            new_name = f"column_{columns.index(col)}"
+
+        if new_name != col:
+            renames[col] = new_name
+
+    if not renames:
+        return {
+            "normalized": False,
+            "message": "All column names are already normalized.",
+            "columns": columns,
+        }
+
+    # Check for conflicts (two columns normalizing to same name)
+    new_names = list(renames.values())
+    if len(new_names) != len(set(new_names)):
+        # Find duplicates and add suffix
+        seen = {}
+        for old, new in list(renames.items()):
+            if new in seen:
+                seen[new] += 1
+                renames[old] = f"{new}_{seen[new]}"
+            else:
+                seen[new] = 0
+
+    # Apply renames
+    for old_name, new_name in renames.items():
+        try:
+            duckdb.sql(f'ALTER TABLE {table} RENAME COLUMN "{old_name}" TO "{new_name}"')
+        except Exception as e:
+            return {
+                "error": f"Failed to rename '{old_name}' to '{new_name}': {str(e)}",
+                "partial_renames": renames,
+            }
+
+    new_columns = _get_column_names(table)
+
+    return {
+        "normalized": True,
+        "renames": renames,
+        "columns_renamed": len(renames),
+        "new_schema": new_columns,
     }
