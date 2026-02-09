@@ -30,43 +30,38 @@ profiler_agent = Agent(
     name="Profiler",
     description=(
         "Analyzes CSV structure and schema. Returns column types, statistics, "
-        "and type coercion recommendations for each column."
+        "and type coercion recommendations for all columns in one call."
     ),
     model=os.getenv("PROFILER_MODEL", DEFAULT_MODEL),
     instruction=PROFILER_PROMPT,
     tools=[
-        FunctionTool(func=tools.get_smart_schema),
-        FunctionTool(func=tools.suggest_type_coercion),
+        FunctionTool(func=tools.profile_all_columns),
     ],
 )
 
 auditor_agent = Agent(
     name="Auditor",
     description=(
-        "Audits data quality issues. Detects type pollution (text in numeric columns), "
-        "statistical outliers via IQR, and mixed date formats."
+        "Audits data quality issues. Detects type pollution, statistical outliers, "
+        "and mixed date formats for all columns in one call."
     ),
     model=os.getenv("AUDITOR_MODEL", DEFAULT_MODEL),
     instruction=AUDITOR_PROMPT,
     tools=[
-        FunctionTool(func=tools.detect_type_pollution),
-        FunctionTool(func=tools.detect_advanced_anomalies),
-        FunctionTool(func=tools.detect_date_formats),
+        FunctionTool(func=tools.audit_all_columns),
     ],
 )
 
 pattern_agent = Agent(
     name="PatternExpert",
     description=(
-        "Identifies consistency issues and patterns. Analyzes value distributions, "
-        "checks logical relationships between columns, and finds whitespace issues."
+        "Identifies consistency issues and patterns. Analyzes casing inconsistencies, "
+        "whitespace issues, and missing value patterns for all columns in one call."
     ),
     model=os.getenv("PATTERN_EXPERT_MODEL", DEFAULT_MODEL),
     instruction=PATTERN_PROMPT,
     tools=[
-        FunctionTool(func=tools.get_value_distribution),
-        FunctionTool(func=tools.check_column_logic),
-        FunctionTool(func=tools.query_data),
+        FunctionTool(func=tools.analyze_all_patterns),
     ],
 )
 
