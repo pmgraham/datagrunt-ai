@@ -341,6 +341,8 @@ function App() {
             <Canvas
               messages={messages}
               onClose={closeCanvas}
+              onSendMessage={handleSendMessage}
+              isAgentRunning={isAgentRunning}
             />
           )}
         </div>
