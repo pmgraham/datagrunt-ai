@@ -7,6 +7,16 @@ const USER_ID = 'web_user';
 export const FRIENDLY_NAMES: Record<string, string> = {
   load_csv: 'Loading CSV into DuckDB',
   inspect_raw_file: 'Inspecting raw file',
+  normalize_column_names: 'Normalizing column names',
+  detect_column_overflow: 'Detecting column overflow',
+  repair_column_overflow: 'Repairing column overflow',
+  detect_era_in_years: 'Detecting era in years',
+  extract_era_column: 'Extracting era column',
+  // Batch tools (optimized)
+  profile_all_columns: 'Profiling all columns',
+  audit_all_columns: 'Auditing all columns',
+  analyze_all_patterns: 'Analyzing all patterns',
+  // Legacy per-column tools
   get_smart_schema: 'Analyzing schema',
   suggest_type_coercion: 'Checking column types',
   detect_type_pollution: 'Detecting type issues',
