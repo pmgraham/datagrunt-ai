@@ -13,12 +13,6 @@ interface ChatBubbleProps {
   showActions?: boolean;
 }
 
-function splitSafeMarkdown(text: string): { safe: string; tail: string } {
-  const lastBreak = text.lastIndexOf('\n\n');
-  if (lastBreak === -1) return { safe: '', tail: text };
-  return { safe: text.slice(0, lastBreak), tail: text.slice(lastBreak + 2) };
-}
-
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -54,14 +48,9 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, i
   }
 
   // Finalized agent messages with text → compact card (only the canvas report) OR inline markdown
-  // Streaming messages → show streaming text inline
+  // Streaming messages → show "generating" indicator (no raw markdown)
   const isFinalized = !message.isStreaming && !!message.text;
   const showAsCard = isFinalized && !!isCanvasReport;
-
-  // For streaming messages, split markdown safely for partial rendering
-  const { safe, tail } = message.isStreaming
-    ? splitSafeMarkdown(message.text)
-    : { safe: '', tail: '' };
 
   return (
     <div className="flex justify-start mb-4">
@@ -150,19 +139,17 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({ message, onOpenCanvas, i
                 </div>
               )}
             </div>
-          ) : (message.text || !message.isStreaming) ? (
-            /* Streaming bubble — show text as it arrives */
+          ) : message.isStreaming ? (
+            /* Streaming — show generating indicator, hide raw markdown */
             <div className="bg-white rounded-2xl rounded-tl-md border border-slate-200 shadow-sm px-4 py-3">
-              {safe && <MarkdownReport content={safe} bare />}
-
-              {tail && (
-                <p className="text-slate-600 text-sm leading-relaxed whitespace-pre-wrap">
-                  {tail}
-                  {message.isStreaming && (
-                    <span className="inline-block w-1.5 h-4 bg-primary-500 ml-0.5 animate-pulse rounded-sm align-text-bottom" />
-                  )}
-                </p>
-              )}
+              <div className="flex items-center gap-2 text-slate-500">
+                <div className="flex gap-1">
+                  <span className="w-1.5 h-1.5 bg-primary-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 bg-primary-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 bg-primary-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+                <span className="text-sm">Generating response...</span>
+              </div>
             </div>
           ) : null}
         </div>
