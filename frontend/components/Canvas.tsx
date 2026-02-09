@@ -152,6 +152,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         loading={loadingPreview}
         onSendMessage={onSendMessage}
         isAgentRunning={isAgentRunning}
+        messages={messages}
       />
     </div>
   );
