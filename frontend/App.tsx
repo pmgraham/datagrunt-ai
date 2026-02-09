@@ -26,7 +26,7 @@ function App() {
   const agentMessageIdRef = useRef<string | null>(null);
 
   const openCanvas = useCallback(() => {
-    setCanvas({ activeTab: 'report' });
+    setCanvas({ isOpen: true });
   }, []);
 
   const closeCanvas = useCallback(() => {
@@ -75,7 +75,7 @@ function App() {
 
     // Auto-open canvas only for report-length messages
     if (fullText && isReportMessage(fullText)) {
-      setCanvas({ activeTab: 'report' });
+      setCanvas({ isOpen: true });
     }
   }, []);
 
@@ -340,8 +340,6 @@ function App() {
           {canvas && (
             <Canvas
               messages={messages}
-              activeTab={canvas.activeTab}
-              onTabChange={(tab) => setCanvas((prev) => prev ? { ...prev, activeTab: tab } : prev)}
               onClose={closeCanvas}
             />
           )}
