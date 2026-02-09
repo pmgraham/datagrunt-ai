@@ -778,6 +778,285 @@ def execute_cleaning_plan(
 
 
 # ---------------------------------------------------------------------------
+# Batch Tools (for parallel processing optimization)
+# ---------------------------------------------------------------------------
+
+def profile_all_columns(tool_context: ToolContext) -> Dict[str, Any]:
+    """Analyzes schema and suggests type coercions for ALL columns in one call.
+
+    This is a batch operation that combines get_smart_schema and suggest_type_coercion
+    for every column, reducing LLM round-trips from O(N) to O(1).
+
+    Returns:
+        Schema info with type suggestions for each column.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    total_rows = reader.row_count_without_header
+    columns = _get_column_names(table)
+
+    # Get schema summary
+    schema = duckdb.sql(f"""
+        SELECT
+            column_name,
+            column_type,
+            approx_unique,
+            null_percentage::FLOAT as null_percentage
+        FROM (SUMMARIZE SELECT * FROM {table})
+    """).pl().to_dicts()
+
+    # Build type coercion suggestions for all columns in one query batch
+    coercion_results = []
+    for col in columns:
+        # Check for Number potential (removing $ and %)
+        number_potential = duckdb.sql(f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE try_cast(regexp_replace("{col}"::VARCHAR, '[\\$\\%\\,]', '', 'g') AS DOUBLE) IS NOT NULL
+              AND "{col}" IS NOT NULL
+        """).fetchone()[0]
+
+        # Check for Date potential
+        date_potential = duckdb.sql(f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE try_cast("{col}" AS DATE) IS NOT NULL
+              OR try_cast(try_strptime("{col}"::VARCHAR, '%m/%d/%Y') AS DATE) IS NOT NULL
+        """).fetchone()[0]
+
+        col_total = duckdb.sql(f'SELECT COUNT(*) FROM {table} WHERE "{col}" IS NOT NULL').fetchone()[0]
+
+        suggestions = []
+        if col_total > 0:
+            if number_potential / col_total > 0.9:
+                suggestions.append("Number")
+            if date_potential / col_total > 0.9:
+                suggestions.append("Date")
+
+        if suggestions:
+            coercion_results.append({
+                "column": col,
+                "suggested_types": suggestions,
+            })
+
+    return {
+        "total_records": total_rows,
+        "total_columns": len(columns),
+        "schema": schema,
+        "type_coercion_suggestions": coercion_results,
+    }
+
+
+def audit_all_columns(tool_context: ToolContext) -> Dict[str, Any]:
+    """Detects data quality issues across ALL columns in one call.
+
+    This is a batch operation that combines detect_type_pollution,
+    detect_advanced_anomalies, and detect_date_formats for every column,
+    reducing LLM round-trips from O(N) to O(1).
+
+    Returns:
+        Quality issues found across all columns.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    columns = _get_column_names(table)
+    total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    pollution_issues = []
+    outlier_issues = []
+    date_format_issues = []
+
+    number_words = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten']
+
+    for col in columns:
+        # --- Type Pollution ---
+        pollutants = duckdb.sql(f"""
+            SELECT "{col}" as value, COUNT(*) as count
+            FROM {table}
+            WHERE try_cast("{col}" AS DOUBLE) IS NULL AND "{col}" IS NOT NULL
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 5
+        """).pl().to_dicts()
+
+        if pollutants:
+            recoverable = [
+                v['value'] for v in pollutants
+                if isinstance(v['value'], str) and (
+                    v['value'].lower().strip() in number_words or
+                    any(c in v['value'] for c in '$%')
+                )
+            ]
+            if recoverable or len(pollutants) > 0:
+                # Check if this column looks numeric (has some castable values)
+                numeric_count = duckdb.sql(f"""
+                    SELECT COUNT(*) FROM {table}
+                    WHERE try_cast("{col}" AS DOUBLE) IS NOT NULL
+                """).fetchone()[0]
+                if numeric_count > 0:  # Only report if column has numeric values
+                    pollution_issues.append({
+                        "column": col,
+                        "pollutants": pollutants[:3],
+                        "recoverable_values": recoverable,
+                    })
+
+        # --- Outliers (IQR) ---
+        stats = duckdb.sql(f"""
+            SELECT
+                approx_quantile(try_cast("{col}" AS DOUBLE), 0.25) as q1,
+                approx_quantile(try_cast("{col}" AS DOUBLE), 0.75) as q3,
+                COUNT(try_cast("{col}" AS DOUBLE)) as numeric_count
+            FROM {table}
+            WHERE try_cast("{col}" AS DOUBLE) IS NOT NULL
+        """).pl().to_dicts()
+
+        if stats and stats[0]["q1"] is not None and stats[0]["q3"] is not None:
+            q1, q3 = stats[0]["q1"], stats[0]["q3"]
+            iqr = q3 - q1
+            if iqr > 0:  # Only check if there's variance
+                lower, upper = q1 - (1.5 * iqr), q3 + (1.5 * iqr)
+                outlier_count = duckdb.sql(f"""
+                    SELECT COUNT(*) FROM {table}
+                    WHERE try_cast("{col}" AS DOUBLE) > {upper}
+                       OR try_cast("{col}" AS DOUBLE) < {lower}
+                """).fetchone()[0]
+                if outlier_count > 0:
+                    outlier_issues.append({
+                        "column": col,
+                        "iqr_bounds": [round(lower, 2), round(upper, 2)],
+                        "outlier_count": outlier_count,
+                    })
+
+        # --- Mixed Date Formats ---
+        formats = [
+            ('%m/%d/%Y', 'MM/DD/YYYY'),
+            ('%d/%m/%Y', 'DD/MM/YYYY'),
+            ('%Y-%m-%d', 'YYYY-MM-DD'),
+            ('%Y/%m/%d', 'YYYY/MM/DD'),
+        ]
+        found_formats = []
+        for fmt, label in formats:
+            match_count = duckdb.sql(f"""
+                SELECT COUNT(*) FROM {table}
+                WHERE try_cast(try_strptime("{col}"::VARCHAR, '{fmt}') AS DATE) IS NOT NULL
+            """).fetchone()[0]
+            if match_count > 0:
+                found_formats.append({"format": label, "count": match_count})
+
+        if len(found_formats) > 1:
+            date_format_issues.append({
+                "column": col,
+                "formats_found": found_formats,
+            })
+
+    return {
+        "total_rows": total_rows,
+        "columns_analyzed": len(columns),
+        "type_pollution": pollution_issues,
+        "outliers": outlier_issues,
+        "mixed_date_formats": date_format_issues,
+    }
+
+
+def analyze_all_patterns(tool_context: ToolContext) -> Dict[str, Any]:
+    """Analyzes value distributions and consistency issues across ALL columns.
+
+    This is a batch operation that combines get_value_distribution and
+    consistency checks for every column, reducing LLM round-trips from O(N) to O(1).
+
+    Returns:
+        Pattern issues (casing inconsistencies, whitespace, etc.) across all columns.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+
+    columns = _get_column_names(table)
+    total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    casing_issues = []
+    whitespace_issues = []
+    missing_value_patterns = []
+
+    for col in columns:
+        # Get unique count to determine if it's a categorical column
+        unique_count = duckdb.sql(f'SELECT COUNT(DISTINCT "{col}") FROM {table}').fetchone()[0]
+
+        # Only analyze columns with reasonable cardinality (likely categorical)
+        if unique_count is not None and 1 < unique_count <= 100:
+            # --- Casing Inconsistencies ---
+            # Find values that differ only by case
+            casing_check = duckdb.sql(f"""
+                SELECT LOWER("{col}") as normalized, COUNT(DISTINCT "{col}") as variants
+                FROM {table}
+                WHERE "{col}" IS NOT NULL
+                GROUP BY LOWER("{col}")
+                HAVING COUNT(DISTINCT "{col}") > 1
+                LIMIT 5
+            """).pl().to_dicts()
+
+            if casing_check:
+                # Get examples of the variants
+                examples = []
+                for item in casing_check[:3]:
+                    variants = duckdb.sql(f"""
+                        SELECT DISTINCT "{col}" as value FROM {table}
+                        WHERE LOWER("{col}") = '{item["normalized"].replace("'", "''")}'
+                        LIMIT 3
+                    """).pl().to_dicts()
+                    examples.extend([v["value"] for v in variants])
+                casing_issues.append({
+                    "column": col,
+                    "inconsistent_groups": len(casing_check),
+                    "examples": examples[:5],
+                })
+
+        # --- Whitespace Issues ---
+        whitespace_count = duckdb.sql(f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE "{col}" IS NOT NULL
+              AND (
+                "{col}" != TRIM("{col}")
+                OR "{col}" LIKE '%  %'
+              )
+        """).fetchone()[0]
+
+        if whitespace_count and whitespace_count > 0:
+            whitespace_issues.append({
+                "column": col,
+                "affected_rows": whitespace_count,
+            })
+
+        # --- Missing Value Patterns (N/A, empty strings, etc.) ---
+        missing_patterns = duckdb.sql(f"""
+            SELECT "{col}" as value, COUNT(*) as count
+            FROM {table}
+            WHERE "{col}" IS NOT NULL
+              AND (
+                LOWER(TRIM("{col}")) IN ('n/a', 'na', 'null', 'none', '-', '--', 'unknown', '')
+                OR "{col}" = ''
+              )
+            GROUP BY 1
+            ORDER BY 2 DESC
+            LIMIT 5
+        """).pl().to_dicts()
+
+        if missing_patterns:
+            missing_value_patterns.append({
+                "column": col,
+                "patterns": missing_patterns,
+            })
+
+    return {
+        "total_rows": total_rows,
+        "columns_analyzed": len(columns),
+        "casing_inconsistencies": casing_issues,
+        "whitespace_issues": whitespace_issues,
+        "missing_value_patterns": missing_value_patterns,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Column Overflow Detection and Repair
 # ---------------------------------------------------------------------------
 
@@ -892,15 +1171,17 @@ def detect_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
 
 
 def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
-    """Automatically repairs column overflow by merging shifted data.
+    """Repairs column overflow by removing extra columns and flagging affected rows.
 
-    When a CSV field contains unquoted delimiters, data shifts into extra columns
-    (usually named column12, column13, etc. or mostly NULL). This tool:
+    When a CSV field contains unquoted delimiters, data shifts right into extra
+    columns. This tool:
 
     1. Identifies overflow columns (sparse columns at the end)
-    2. For rows with overflow, merges the overflow values back into the last
-       "real" column before the overflow started
-    3. Drops the empty overflow columns
+    2. Flags rows that have data in overflow columns with 'is_shifted = true'
+    3. Drops the overflow columns
+
+    Rows marked is_shifted=true may have misaligned data and should be reviewed.
+    The tool preserves data integrity by not guessing at realignment.
 
     No parameters needed - automatically detects and repairs overflow.
 
@@ -915,7 +1196,7 @@ def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
     total_rows = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
     # Snapshot before
-    before_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+    before_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 10").pl()
 
     # Step 1: Identify overflow columns (>80% NULL and at the end)
     null_counts = {}
@@ -941,7 +1222,7 @@ def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
             "columns": columns,
         }
 
-    # Step 2: Find the anchor column (last real column before overflow)
+    # Step 2: Find the real columns (before overflow)
     first_overflow_idx = columns.index(overflow_cols[0])
     if first_overflow_idx == 0:
         return {
@@ -949,34 +1230,28 @@ def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
             "columns": columns,
         }
 
-    anchor_column = columns[first_overflow_idx - 1]
-    keep_columns = columns[:first_overflow_idx]
+    real_columns = columns[:first_overflow_idx]
 
-    # Step 3: For each row, merge overflow values back into the anchor column
-    # Build a query that concatenates non-null overflow values
-    overflow_concat_parts = []
-    for col in overflow_cols:
-        overflow_concat_parts.append(f'COALESCE("{col}", \'\')')
+    # Step 3: Build expression to detect rows with overflow data
+    overflow_check_expr = " OR ".join([
+        f'("{col}" IS NOT NULL AND TRIM("{col}") != \'\')'
+        for col in overflow_cols
+    ])
 
-    overflow_concat = " || ', ' || ".join(overflow_concat_parts)
+    # Count affected rows
+    shifted_count = duckdb.sql(f"""
+        SELECT COUNT(*) FROM {table}
+        WHERE {overflow_check_expr}
+    """).fetchone()[0]
 
-    # Create repaired table
-    keep_cols_select = ", ".join([f'"{col}"' for col in keep_columns[:-1]])  # All except anchor
+    # Step 4: Create repaired table with only real columns + is_shifted flag
+    real_cols_select = ", ".join([f'"{col}"' for col in real_columns])
 
-    # For the anchor column, append overflow data if any exists
     repair_query = f'''
         CREATE OR REPLACE TABLE {table}_repaired AS
         SELECT
-            {keep_cols_select + ',' if keep_cols_select else ''}
-            CASE
-                WHEN ({overflow_concat}) != '' AND ({overflow_concat}) != ', , , , , , '
-                THEN COALESCE("{anchor_column}", '') || ', ' ||
-                     regexp_replace(
-                         regexp_replace({overflow_concat}, '^[, ]+', ''),
-                         '[, ]+$', ''
-                     )
-                ELSE "{anchor_column}"
-            END as "{anchor_column}"
+            {real_cols_select},
+            CASE WHEN ({overflow_check_expr}) THEN true ELSE false END as is_shifted
         FROM {table}
     '''
 
@@ -994,20 +1269,27 @@ def repair_column_overflow(tool_context: ToolContext) -> Dict[str, Any]:
 
     # Validate
     after_count = duckdb.sql(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-    after_sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
     new_columns = _get_column_names(table)
+
+    # Get sample including some shifted rows
+    after_sample = duckdb.sql(f"""
+        (SELECT * FROM {table} WHERE is_shifted = true LIMIT 3)
+        UNION ALL
+        (SELECT * FROM {table} WHERE is_shifted = false LIMIT 3)
+    """).pl()
 
     return {
         "repaired": True,
-        "anchor_column": anchor_column,
         "overflow_columns_removed": overflow_cols,
         "columns_before": len(columns),
         "columns_after": len(new_columns),
         "columns_removed": len(overflow_cols),
-        "rows_processed": after_count,
+        "rows_flagged": shifted_count,
+        "rows_total": after_count,
         "new_schema": new_columns,
         "before_sample": _to_markdown(before_sample),
         "after_sample": _to_markdown(after_sample),
+        "note": f"Removed {len(overflow_cols)} overflow columns. Flagged {shifted_count} rows with is_shifted=true that had data in overflow columns - these rows may have misaligned data and should be reviewed.",
     }
 
 
