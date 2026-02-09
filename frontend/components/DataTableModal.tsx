@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { CleanedDataRow, ChatMessage } from '../types';
 import { DataTable } from './DataTable';
-import { MarkdownReport } from './MarkdownReport';
-import { X, Send, MessageSquare } from 'lucide-react';
+import { ChatBubble } from './ChatBubble';
+import { X, Send, MessageSquare, RefreshCw } from 'lucide-react';
 
 interface DataTableModalProps {
   isOpen: boolean;
@@ -13,6 +13,7 @@ interface DataTableModalProps {
   onSendMessage: (text: string) => void;
   isAgentRunning: boolean;
   messages: ChatMessage[];
+  onRefreshData: () => void;
 }
 
 export const DataTableModal: React.FC<DataTableModalProps> = ({
@@ -24,18 +25,40 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
   onSendMessage,
   isAgentRunning,
   messages,
+  onRefreshData,
 }) => {
   const [inputText, setInputText] = useState('');
   const [showChat, setShowChat] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const prevAgentRunning = useRef(isAgentRunning);
 
-  // Auto-scroll chat to bottom when new messages arrive
+  // Auto-scroll chat to bottom when messages update
   useEffect(() => {
     if (showChat && chatEndRef.current) {
       chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, showChat]);
+  }, [messages, messages[messages.length - 1]?.text, showChat]);
+
+  // Scroll to bottom when modal opens
+  useEffect(() => {
+    if (isOpen && showChat && chatEndRef.current) {
+      // Use setTimeout to ensure DOM is ready
+      setTimeout(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'auto' });
+      }, 100);
+    }
+  }, [isOpen, showChat]);
+
+  // Auto-refresh data when agent finishes
+  useEffect(() => {
+    if (prevAgentRunning.current && !isAgentRunning) {
+      // Agent just finished - refresh the data
+      onRefreshData();
+    }
+    prevAgentRunning.current = isAgentRunning;
+  }, [isAgentRunning, onRefreshData]);
 
   const handleSubmit = useCallback(() => {
     const trimmed = inputText.trim();
@@ -85,7 +108,18 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
       <div className="relative w-[95vw] h-[90vh] bg-white rounded-xl shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50">
-          <h2 className="text-lg font-semibold text-slate-800">Data Preview</h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-lg font-semibold text-slate-800">Data Preview</h2>
+            <button
+              onClick={onRefreshData}
+              disabled={loading}
+              className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-50"
+              aria-label="Refresh data"
+              title="Refresh data"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowChat(!showChat)}
@@ -124,36 +158,20 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
             )}
           </div>
 
-          {/* Chat Panel */}
+          {/* Chat Panel - exact replica of main chat */}
           {showChat && (
-            <div className="w-96 flex-shrink-0 flex flex-col bg-slate-50">
-              {/* Messages */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {messages.filter(m => m.text).map((msg) => (
-                  <div
-                    key={msg.id}
-                    className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                        msg.role === 'user'
-                          ? 'bg-primary-600 text-white'
-                          : 'bg-white border border-slate-200 text-slate-700'
-                      }`}
-                    >
-                      {msg.role === 'agent' ? (
-                        <div className="text-sm [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm [&_p]:mb-2 [&_p]:text-sm [&_table]:text-xs">
-                          <MarkdownReport content={msg.text} bare />
-                        </div>
-                      ) : (
-                        <p>{msg.text}</p>
-                      )}
-                      {msg.isStreaming && (
-                        <span className="inline-block w-1.5 h-4 ml-1 bg-slate-400 animate-pulse rounded-sm" />
-                      )}
-                    </div>
-                  </div>
-                ))}
+            <div className="w-[420px] flex-shrink-0 flex flex-col bg-slate-50/50">
+              {/* Messages - using ChatBubble like main chat */}
+              <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-3 py-4">
+                <div className="space-y-1 [&>div]:scale-90 [&>div]:origin-top-left [&>div]:w-[111%]">
+                  {messages.map((msg) => (
+                    <ChatBubble
+                      key={msg.id}
+                      message={msg}
+                      onSendMessage={onSendMessage}
+                    />
+                  ))}
+                </div>
                 <div ref={chatEndRef} />
               </div>
 
