@@ -5,7 +5,7 @@ import { DataTable } from './DataTable';
 import { fetchPreviewRows } from '../services/adkService';
 import { getDownloadUrl } from '../services/adkService';
 import { X, Download, FileText, Table as TableIcon, FileDown } from 'lucide-react';
-import { isReportMessage } from '../utils';
+import { isReportMessage, deduplicateReport } from '../utils';
 
 interface CanvasProps {
   messages: ChatMessage[];
@@ -28,6 +28,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   // Always show the most detailed report in the canvas. Pick the longest
   // report-length agent message so that short cleaning confirmations or
   // follow-up replies never replace the initial analysis.
+  // Also deduplicate if the model repeated the report.
   const reportContent = useMemo(() => {
     let best = '';
     for (const m of messages) {
@@ -37,7 +38,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         }
       }
     }
-    return best;
+    return deduplicateReport(best);
   }, [messages]);
 
   // Check if any message has a downloadable file (Data tab available)

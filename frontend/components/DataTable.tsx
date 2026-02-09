@@ -10,7 +10,7 @@ interface DataTableProps {
 
 export const DataTable: React.FC<DataTableProps> = ({ data, totalRows }) => {
   const [currentPage, setCurrentPage] = useState(1);
-  const rowsPerPage = 10;
+  const rowsPerPage = 25;
 
   if (!data || data.length === 0) {
     return (
@@ -81,8 +81,8 @@ export const DataTable: React.FC<DataTableProps> = ({ data, totalRows }) => {
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
                 {columns.map((col) => (
-                  <th key={col} className="px-6 py-3 font-semibold text-slate-700 capitalize">
-                    {col.replace(/_/g, ' ')}
+                  <th key={col} className="px-6 py-3 font-semibold text-slate-700">
+                    {col}
                   </th>
                 ))}
               </tr>

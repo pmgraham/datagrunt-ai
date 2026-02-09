@@ -60,5 +60,12 @@ class DuckDBQueries:
         
         return f"""
             CREATE OR REPLACE TABLE {table_name} AS
-            SELECT * FROM read_csv('{self.filepath}', auto_detect=true, normalize_names=true);
+            SELECT * FROM read_csv(
+                '{self.filepath}',
+                auto_detect=true,
+                normalize_names=true,
+                quote='"',
+                escape='"',
+                ignore_errors=true
+            );
         """
