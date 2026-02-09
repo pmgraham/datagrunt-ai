@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
 import { CleanedDataRow, ChatMessage } from '../types';
 import { DataTable } from './DataTable';
+import { MarkdownReport } from './MarkdownReport';
 import { X, Send, MessageSquare } from 'lucide-react';
 
 interface DataTableModalProps {
@@ -142,8 +142,8 @@ export const DataTableModal: React.FC<DataTableModalProps> = ({
                       }`}
                     >
                       {msg.role === 'agent' ? (
-                        <div className="prose prose-sm prose-slate max-w-none">
-                          <ReactMarkdown>{msg.text}</ReactMarkdown>
+                        <div className="text-sm [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm [&_p]:mb-2 [&_p]:text-sm [&_table]:text-xs">
+                          <MarkdownReport content={msg.text} bare />
                         </div>
                       ) : (
                         <p>{msg.text}</p>
