@@ -72,6 +72,7 @@ root_agent = Agent(
         tools.extract_era_column,
         tools.preview_full_plan,
         tools.execute_cleaning_plan,
+        tools.save_cleaned_csv,
         tools.validate_cleaned_data,
         tools.query_data,
     ],

@@ -29,6 +29,26 @@ from app.datagrunt import CSVReader, DuckDBQueries
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _filename_to_snake_case(file_path: str) -> str:
+    """Extract the filename stem from a path and convert to snake_case.
+
+    Returns 'uploaded_data' for temp files where the name is meaningless.
+    Examples:
+        '/home/user/MY FILE.csv'  -> 'my_file'
+        '/tmp/tmpXb3kq.csv'       -> 'uploaded_data'
+        'Sales-Report 2024.csv'   -> 'sales_report_2024'
+    """
+    stem = os.path.splitext(os.path.basename(file_path))[0]
+    # Temp files from uploads have no meaningful name
+    if stem.startswith("tmp") and len(stem) <= 12:
+        return "uploaded_data"
+    # Replace non-alphanumeric characters (except underscores) with underscores
+    name = _re.sub(r'[^\w]+', '_', stem)
+    # Collapse multiple underscores, strip edges
+    name = _re.sub(r'_+', '_', name).strip('_')
+    return name.lower() or "uploaded_data"
+
+
 def _validate_path(path: str) -> str:
     """Validates that the path is absolute and exists.
 
@@ -304,6 +324,9 @@ def load_csv(
 
     # Store path early so inspect_raw_file can use it if we fail
     tool_context.state["csv_path"] = file_path
+    # Capture original filename for the cleaned artifact name
+    if not tool_context.state.get("original_filename"):
+        tool_context.state["original_filename"] = _filename_to_snake_case(file_path)
 
     # Count source lines (minus header) for verification
     source_line_count = 0
@@ -1047,15 +1070,17 @@ def validate_cleaned_data(tool_context: ToolContext) -> str:
     return "\n".join(out)
 
 
-async def execute_cleaning_plan(
+def execute_cleaning_plan(
     sql_statements: List[str], tool_context: ToolContext
 ) -> str:
-    """Executes approved DuckDB SQL cleaning statements against the loaded CSV.
+    """Executes DuckDB SQL cleaning statements against the loaded CSV.
 
     Loads the CSV into a table called 'data', runs each SQL statement
-    sequentially, exports the cleaned result to a new file, saves the
-    cleaned CSV as a downloadable artifact, and updates the session state
-    so subsequent tools use the cleaned data.
+    sequentially, exports the cleaned result to a new file, and updates the
+    session state so subsequent tools use the cleaned data.
+
+    Does NOT produce a download — call 'save_cleaned_csv' after this to
+    generate the downloadable file.
     """
     reader = _get_reader(tool_context)
     table = reader.db_table
@@ -1130,26 +1155,12 @@ async def execute_cleaning_plan(
         del _readers[old_path]
     tool_context.state["csv_path"] = cleaned_path
 
-    # Save cleaned CSV as an ADK artifact for download
-    artifact_filename = os.path.basename(cleaned_path)
-    artifact_note = ""
-    try:
-        with open(cleaned_path, "rb") as f:
-            csv_bytes = f.read()
-        artifact_part = types.Part.from_bytes(
-            data=csv_bytes, mime_type="text/csv"
-        )
-        await tool_context.save_artifact(artifact_filename, artifact_part)
-    except Exception as e:
-        artifact_note = f"\n\n*(Artifact save failed: {e})*"
-
     sample = duckdb.sql("SELECT * FROM data LIMIT 5").pl()
 
     # Build markdown output
     out = ["## Cleaning Complete\n"]
     out.append(f"- **Rows:** {rows_after:,}")
     out.append(f"- **Rows before:** {rows_before:,}")
-    out.append(f"- **Artifact:** `{artifact_filename}` (available for download)")
 
     out.append("\n### Steps Executed\n")
     for s in executed:
@@ -1168,10 +1179,45 @@ async def execute_cleaning_plan(
 
     out.append(f"\n### Sample Data\n\n{_to_markdown(sample)}")
 
-    if artifact_note:
-        out.append(artifact_note)
-
     return "\n".join(out)
+
+
+async def save_cleaned_csv(tool_context: ToolContext) -> str:
+    """Saves the cleaned CSV as a downloadable artifact.
+
+    Call this ONCE after 'execute_cleaning_plan' completes successfully.
+    It saves the current cleaned data as a downloadable file that appears
+    in the chat as a download button.
+
+    No parameters needed — uses the cleaned file from the session state.
+    """
+    # Prevent duplicate artifact saves — only save once per session
+    if tool_context.state.get("_artifact_saved"):
+        return "Download is already available — see the download link above."
+
+    csv_path = tool_context.state.get("csv_path")
+    if not csv_path or not os.path.exists(csv_path):
+        return _format_error("No cleaned file found. Run execute_cleaning_plan first.")
+
+    original_name = tool_context.state.get("original_filename", "uploaded_data")
+    artifact_filename = f"{original_name}_cleaned.csv"
+    try:
+        with open(csv_path, "rb") as f:
+            csv_bytes = f.read()
+        artifact_part = types.Part.from_bytes(
+            data=csv_bytes, mime_type="text/csv"
+        )
+        await tool_context.save_artifact(artifact_filename, artifact_part)
+        tool_context.state["_artifact_saved"] = True
+    except Exception as e:
+        return _format_error(f"Failed to save artifact: {e}")
+
+    row_count = duckdb.sql("SELECT COUNT(*) FROM data").fetchone()[0]
+
+    return (
+        f"## Download Ready\n\n"
+        f"Cleaned **{row_count:,} rows** — your file is ready for download."
+    )
 
 
 # ---------------------------------------------------------------------------
