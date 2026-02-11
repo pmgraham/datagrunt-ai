@@ -57,7 +57,7 @@ select = [
 ignore = ["E501", "C901", "B006"] # ignore line too long, too complex
 
 [tool.ruff.lint.isort]
-known-first-party = ["app", "frontend"]
+known-first-party = ["src", "frontend"]
 
 [tool.ty]
 # ty is Astral's Rust-based type checker (same team as ruff/uv)
@@ -95,7 +95,7 @@ pythonpath = "."
 asyncio_default_fixture_loop_scope = "function"
 
 [tool.hatch.build.targets.wheel]
-packages = ["app","frontend"]
+packages = ["src","frontend"]
 
 [tool.agent-starter-pack]
 # Generation metadata - enables CLI commands to understand project context
@@ -103,7 +103,7 @@ packages = ["app","frontend"]
 name = "clean-csv-agent"
 description = "CSV cleaning agent powered by DuckDB"
 base_template = "adk"
-agent_directory = "app"
+agent_directory = "src"
 
 # Generation context
 generated_at = "2026-02-11T12:06:49.597003+00:00"

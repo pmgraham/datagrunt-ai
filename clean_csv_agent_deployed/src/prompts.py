@@ -14,7 +14,7 @@
 
 """Agent instruction prompts for the clean-csv-agent system."""
 
-from app.duckdb_reference import DUCKDB_SQL_REFERENCE
+from src.duckdb_reference import DUCKDB_SQL_REFERENCE
 
 # ---------------------------------------------------------------------------
 # Coordinator Prompt
