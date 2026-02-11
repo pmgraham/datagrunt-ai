@@ -124,19 +124,26 @@ def _run_sql_safe(sql: str, table: str) -> pl.DataFrame:
         ) from None
 
 
+def _build_table(headers: List[str], rows: List[List[str]]) -> str:
+    """Build a markdown table from headers and row data."""
+    header = "| " + " | ".join(str(h) for h in headers) + " |"
+    sep = "| " + " | ".join("---" for _ in headers) + " |"
+    lines = [header, sep]
+    for row in rows:
+        lines.append(
+            "| " + " | ".join(str(c).replace("|", "\\|") for c in row) + " |"
+        )
+    return "\n".join(lines)
+
+
 def _to_markdown(frame: pl.DataFrame, exclude: List[str] = None) -> str:
     """Convert a Polars DataFrame to a markdown table string."""
     if frame.is_empty():
-        return "No rows."
+        return "*No rows.*"
     exclude = exclude or []
     cols = [c for c in frame.columns if c not in exclude]
-    header = "| " + " | ".join(cols) + " |"
-    sep = "| " + " | ".join("---" for _ in cols) + " |"
-    rows = []
-    for row in frame.to_dicts():
-        row_str = "| " + " | ".join(str(row[c]).replace("|", "\\|") for c in cols) + " |"
-        rows.append(row_str)
-    return "\n".join([header, sep] + rows)
+    rows = [[str(row[c]) for c in cols] for row in frame.to_dicts()]
+    return _build_table(cols, rows)
 
 
 def _format_error(message: str, **details) -> str:
@@ -382,10 +389,8 @@ def load_csv(
         out.append(f"- **Parse config:** {best_config['name']}")
 
     out.append("\n### Schema\n")
-    out.append("| Column | Type |")
-    out.append("| --- | --- |")
-    for c in columns:
-        out.append(f"| {c['column_name']} | {c['column_type']} |")
+    schema_rows = [[c["column_name"], c["column_type"]] for c in columns]
+    out.append(_build_table(["Column", "Type"], schema_rows))
 
     out.append(f"\n### Sample Data (first 5 rows)\n\n{_to_markdown(sample)}")
 
@@ -409,6 +414,191 @@ def load_csv(
         out.append("\n### Warnings\n")
         for w in warnings:
             out.append(f"- {w}")
+
+    return "\n".join(out)
+
+
+def fix_unknown_values(tool_context: ToolContext) -> str:
+    """Detects and fixes 'Unknown' placeholder values caused by encoding issues.
+
+    Scans all columns for 'Unknown'/'unknown' values that may result from
+    character encoding problems during CSV loading. If detected, tries
+    alternative encodings (Latin-1, Windows-1252, etc.) to recover the
+    original characters and reloads the data.
+
+    Call this immediately after load_csv. No parameters needed.
+    """
+    reader = _get_reader(tool_context)
+    table = reader.db_table
+    _ensure_table(reader)
+    csv_path = tool_context.state.get("csv_path")
+
+    if not csv_path or not os.path.exists(csv_path):
+        return _format_error("No CSV file found in session.")
+
+    columns = _get_column_names(table)
+
+    # Step 1: Count 'Unknown' and replacement-character values per column
+    unknown_counts = {}
+    total_unknowns = 0
+
+    for col in columns:
+        count = duckdb.sql(f"""
+            SELECT COUNT(*) FROM {table}
+            WHERE LOWER(TRIM(CAST("{col}" AS VARCHAR))) = 'unknown'
+               OR CAST("{col}" AS VARCHAR) LIKE '%\uFFFD%'
+        """).fetchone()[0]
+        if count > 0:
+            unknown_counts[col] = count
+            total_unknowns += count
+
+    if total_unknowns == 0:
+        return (
+            "## Encoding Check\n\n"
+            "No 'Unknown' or unrecognized character values found. "
+            "Character encoding looks correct."
+        )
+
+    # Step 2: Try alternative encodings to recover original characters
+    encodings_to_try = [
+        ("utf-8-sig", "UTF-8 with BOM"),
+        ("latin-1", "Latin-1 (ISO-8859-1)"),
+        ("windows-1252", "Windows-1252 (Western European)"),
+        ("iso-8859-15", "ISO-8859-15 (Latin-9)"),
+        ("cp437", "CP437 (DOS)"),
+        ("mac-roman", "Mac Roman"),
+    ]
+
+    best_encoding = None
+    best_unknown_count = total_unknowns
+    best_temp_path = None
+    test_table = f"{table}_enc_test"
+
+    for enc, label in encodings_to_try:
+        temp_path = None
+        try:
+            with open(csv_path, "rb") as f:
+                raw_bytes = f.read()
+            decoded = raw_bytes.decode(enc)
+
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False, encoding="utf-8"
+            )
+            tmp.write(decoded)
+            tmp.close()
+            temp_path = tmp.name
+
+            duckdb.sql(f"""
+                CREATE OR REPLACE TABLE {test_table} AS
+                SELECT * FROM read_csv(
+                    '{temp_path}',
+                    auto_detect = true,
+                    strict_mode = false,
+                    null_padding = true,
+                    all_varchar = true
+                )
+            """)
+
+            test_cols = _get_column_names(test_table)
+            test_unknowns = 0
+            for col in test_cols:
+                cnt = duckdb.sql(f"""
+                    SELECT COUNT(*) FROM {test_table}
+                    WHERE LOWER(TRIM(CAST("{col}" AS VARCHAR))) = 'unknown'
+                       OR CAST("{col}" AS VARCHAR) LIKE '%\uFFFD%'
+                """).fetchone()[0]
+                test_unknowns += cnt
+
+            if test_unknowns < best_unknown_count:
+                if best_temp_path and os.path.exists(best_temp_path):
+                    os.remove(best_temp_path)
+                best_unknown_count = test_unknowns
+                best_encoding = (enc, label)
+                best_temp_path = temp_path
+                temp_path = None  # Prevent cleanup in finally
+
+            if test_unknowns == 0:
+                break
+
+        except (UnicodeDecodeError, UnicodeError):
+            pass
+        except Exception:
+            pass
+        finally:
+            duckdb.sql(f"DROP TABLE IF EXISTS {test_table}")
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+
+    # Step 3: Apply best encoding if it recovered values
+    recovered = total_unknowns - best_unknown_count
+
+    if best_encoding and recovered > 0 and best_temp_path:
+        enc, label = best_encoding
+        try:
+            duckdb.sql(f"""
+                CREATE OR REPLACE TABLE {table} AS
+                SELECT * FROM read_csv(
+                    '{best_temp_path}',
+                    auto_detect = true,
+                    strict_mode = false,
+                    null_padding = true,
+                    all_varchar = true
+                )
+            """)
+
+            _normalize_column_names(table)
+
+            # Clear cached reader so subsequent tools use the refreshed table
+            if csv_path in _readers:
+                del _readers[csv_path]
+
+            os.remove(best_temp_path)
+
+            out = ["## Encoding Fix Applied\n"]
+            out.append(f"- **Encoding detected:** {label} (`{enc}`)")
+            out.append(f"- **Values recovered:** {recovered:,}")
+            out.append(f"- **Remaining unknowns:** {best_unknown_count:,}")
+
+            out.append("\n### Affected Columns\n")
+            col_rows = [
+                [col, f"{count:,}"] for col, count in unknown_counts.items()
+            ]
+            out.append(_build_table(["Column", "Unknown Values Fixed"], col_rows))
+
+            sample = duckdb.sql(f"SELECT * FROM {table} LIMIT 5").pl()
+            out.append(f"\n### Sample Data After Re-encoding\n\n{_to_markdown(sample)}")
+
+            return "\n".join(out)
+
+        except Exception as e:
+            if best_temp_path and os.path.exists(best_temp_path):
+                os.remove(best_temp_path)
+            return _format_error(
+                f"Failed to apply encoding fix: {e}",
+                attempted_encoding=label,
+            )
+
+    # No encoding fix helped — these are likely legitimate placeholder values
+    if best_temp_path and os.path.exists(best_temp_path):
+        os.remove(best_temp_path)
+
+    out = ["## Encoding Check\n"]
+    out.append(
+        f"Found **{total_unknowns:,}** 'Unknown' values across "
+        f"**{len(unknown_counts)}** column(s), but no encoding fix improved them. "
+        "These appear to be legitimate placeholder values in the source data."
+    )
+
+    out.append("\n### Affected Columns\n")
+    col_rows = [
+        [col, f"{count:,}"] for col, count in unknown_counts.items()
+    ]
+    out.append(_build_table(["Column", "Count"], col_rows))
+
+    out.append(
+        "\n**Recommendation:** Include these in the cleaning plan — "
+        "convert to NULL or a consistent placeholder."
+    )
 
     return "\n".join(out)
 
@@ -838,32 +1028,34 @@ def validate_cleaned_data(tool_context: ToolContext) -> str:
     out.append(f"- **Total rows:** {total_rows:,}")
 
     out.append("\n### Column Results\n")
-    out.append("| Column | Type | Status | Issues |")
-    out.append("| --- | --- | :---: | --- |")
+    col_rows = []
     for r in column_reports:
         status = "PASS" if r["passed"] else "FAIL"
         issues_str = "; ".join(r["issues"]) if r["issues"] else "—"
-        out.append(f"| {r['column']} | {r['type']} | {status} | {issues_str} |")
+        col_rows.append([r["column"], r["type"], status, issues_str])
+    out.append(_build_table(["Column", "Type", "Status", "Issues"], col_rows))
 
     numeric_ranges = [r for r in column_reports if r.get("range")]
     if numeric_ranges:
         out.append("\n### Numeric Ranges\n")
-        out.append("| Column | Min | Max |")
-        out.append("| --- | ---: | ---: |")
-        for r in numeric_ranges:
-            out.append(f"| {r['column']} | {r['range']['min']} | {r['range']['max']} |")
+        range_rows = [
+            [r["column"], str(r["range"]["min"]), str(r["range"]["max"])]
+            for r in numeric_ranges
+        ]
+        out.append(_build_table(["Column", "Min", "Max"], range_rows))
 
     return "\n".join(out)
 
 
-def execute_cleaning_plan(
+async def execute_cleaning_plan(
     sql_statements: List[str], tool_context: ToolContext
 ) -> str:
     """Executes approved DuckDB SQL cleaning statements against the loaded CSV.
 
     Loads the CSV into a table called 'data', runs each SQL statement
-    sequentially, exports the cleaned result to a new file, and updates the
-    session state so subsequent tools use the cleaned data.
+    sequentially, exports the cleaned result to a new file, saves the
+    cleaned CSV as a downloadable artifact, and updates the session state
+    so subsequent tools use the cleaned data.
     """
     reader = _get_reader(tool_context)
     table = reader.db_table
@@ -947,7 +1139,7 @@ def execute_cleaning_plan(
         artifact_part = types.Part.from_bytes(
             data=csv_bytes, mime_type="text/csv"
         )
-        tool_context.save_artifact(artifact_filename, artifact_part)
+        await tool_context.save_artifact(artifact_filename, artifact_part)
     except Exception as e:
         artifact_note = f"\n\n*(Artifact save failed: {e})*"
 
@@ -957,7 +1149,6 @@ def execute_cleaning_plan(
     out = ["## Cleaning Complete\n"]
     out.append(f"- **Rows:** {rows_after:,}")
     out.append(f"- **Rows before:** {rows_before:,}")
-    out.append(f"- **Cleaned file:** `{cleaned_path}`")
     out.append(f"- **Artifact:** `{artifact_filename}` (available for download)")
 
     out.append("\n### Steps Executed\n")
@@ -1050,20 +1241,22 @@ def profile_all_columns(tool_context: ToolContext) -> str:
     out.append(f"- **Total columns:** {len(columns)}")
 
     out.append("\n### Schema\n")
-    out.append("| Column | Type | Approx Unique | Null % |")
-    out.append("| --- | --- | ---: | ---: |")
-    for s in schema:
-        out.append(
-            f"| {s['column_name']} | {s['column_type']} | "
-            f"{s['approx_unique']} | {s['null_percentage']:.1f}% |"
-        )
+    schema_rows = [
+        [s["column_name"], s["column_type"], str(s["approx_unique"]),
+         f"{s['null_percentage']:.1f}%"]
+        for s in schema
+    ]
+    out.append(_build_table(
+        ["Column", "Type", "Approx Unique", "Null %"], schema_rows
+    ))
 
     if coercion_results:
         out.append("\n### Type Coercion Suggestions\n")
-        out.append("| Column | Suggested Types |")
-        out.append("| --- | --- |")
-        for c in coercion_results:
-            out.append(f"| {c['column']} | {', '.join(c['suggested_types'])} |")
+        coerce_rows = [
+            [c["column"], ", ".join(c["suggested_types"])]
+            for c in coercion_results
+        ]
+        out.append(_build_table(["Column", "Suggested Types"], coerce_rows))
     else:
         out.append("\n*No type coercion suggestions.*")
 
@@ -1178,8 +1371,7 @@ def audit_all_columns(tool_context: ToolContext) -> str:
 
     if pollution_issues:
         out.append("\n### Type Pollution\n")
-        out.append("| Column | Pollutants | Recoverable |")
-        out.append("| --- | --- | --- |")
+        poll_rows = []
         for p in pollution_issues:
             pollutant_strs = [
                 f"{v['value']} ({v['count']})" for v in p["pollutants"][:3]
@@ -1189,33 +1381,37 @@ def audit_all_columns(tool_context: ToolContext) -> str:
                 if p["recoverable_values"]
                 else "—"
             )
-            out.append(
-                f"| {p['column']} "
-                f"| {', '.join(pollutant_strs).replace('|', '\\|')} "
-                f"| {recoverable.replace('|', '\\|')} |"
-            )
+            poll_rows.append([
+                p["column"], ", ".join(pollutant_strs), recoverable
+            ])
+        out.append(_build_table(
+            ["Column", "Pollutants", "Recoverable"], poll_rows
+        ))
     else:
         out.append("\n### Type Pollution\n\n*No issues found.*")
 
     if outlier_issues:
         out.append("\n### Outliers (IQR)\n")
-        out.append("| Column | IQR Bounds | Outlier Count |")
-        out.append("| --- | --- | ---: |")
-        for o in outlier_issues:
-            bounds = f"[{o['iqr_bounds'][0]}, {o['iqr_bounds'][1]}]"
-            out.append(f"| {o['column']} | {bounds} | {o['outlier_count']:,} |")
+        outlier_rows = [
+            [o["column"],
+             f"[{o['iqr_bounds'][0]}, {o['iqr_bounds'][1]}]",
+             f"{o['outlier_count']:,}"]
+            for o in outlier_issues
+        ]
+        out.append(_build_table(
+            ["Column", "IQR Bounds", "Outlier Count"], outlier_rows
+        ))
     else:
         out.append("\n### Outliers (IQR)\n\n*No issues found.*")
 
     if date_format_issues:
         out.append("\n### Mixed Date Formats\n")
-        out.append("| Column | Formats Found |")
-        out.append("| --- | --- |")
-        for d in date_format_issues:
-            fmts = ", ".join(
-                f"{f['format']} ({f['count']})" for f in d["formats_found"]
-            )
-            out.append(f"| {d['column']} | {fmts} |")
+        date_rows = [
+            [d["column"],
+             ", ".join(f"{f['format']} ({f['count']})" for f in d["formats_found"])]
+            for d in date_format_issues
+        ]
+        out.append(_build_table(["Column", "Formats Found"], date_rows))
     else:
         out.append("\n### Mixed Date Formats\n\n*No issues found.*")
 
@@ -1336,35 +1532,32 @@ def analyze_all_patterns(tool_context: ToolContext) -> str:
 
     if casing_issues:
         out.append("\n### Casing Inconsistencies\n")
-        out.append("| Column | Groups | Examples |")
-        out.append("| --- | ---: | --- |")
-        for c in casing_issues:
-            examples = ", ".join(
-                f"'{e}'" for e in c["examples"][:5]
-            ).replace("|", "\\|")
-            out.append(
-                f"| {c['column']} | {c['inconsistent_groups']} | {examples} |"
-            )
+        case_rows = [
+            [c["column"], str(c["inconsistent_groups"]),
+             ", ".join(f"'{e}'" for e in c["examples"][:5])]
+            for c in casing_issues
+        ]
+        out.append(_build_table(["Column", "Groups", "Examples"], case_rows))
     else:
         out.append("\n### Casing Inconsistencies\n\n*No issues found.*")
 
     if whitespace_issues:
         out.append("\n### Whitespace Issues\n")
-        out.append("| Column | Affected Rows |")
-        out.append("| --- | ---: |")
-        for w in whitespace_issues:
-            out.append(f"| {w['column']} | {w['affected_rows']:,} |")
+        ws_rows = [
+            [w["column"], f"{w['affected_rows']:,}"]
+            for w in whitespace_issues
+        ]
+        out.append(_build_table(["Column", "Affected Rows"], ws_rows))
     else:
         out.append("\n### Whitespace Issues\n\n*No issues found.*")
 
     if missing_value_patterns:
         out.append("\n### Missing Value Patterns\n")
-        out.append("| Column | Pattern | Count |")
-        out.append("| --- | --- | ---: |")
+        mv_rows = []
         for m in missing_value_patterns:
             for p in m["patterns"]:
-                val = str(p["value"]).replace("|", "\\|")
-                out.append(f"| {m['column']} | `{val}` | {p['count']:,} |")
+                mv_rows.append([m["column"], str(p["value"]), f"{p['count']:,}"])
+        out.append(_build_table(["Column", "Pattern", "Count"], mv_rows))
     else:
         out.append("\n### Missing Value Patterns\n\n*No issues found.*")
 
@@ -1803,17 +1996,17 @@ def detect_era_in_years(column: str, tool_context: ToolContext) -> str:
     out.append(f"- **Rows with era:** {era_count:,} ({pct}%)")
 
     out.append("\n### Era Distribution\n")
-    out.append("| Era | Count |")
-    out.append("| --- | ---: |")
-    for era, count in era_distribution.items():
-        if count > 0:
-            out.append(f"| {era} | {count:,} |")
+    era_dist_rows = [
+        [era, f"{count:,}"]
+        for era, count in era_distribution.items() if count > 0
+    ]
+    out.append(_build_table(["Era", "Count"], era_dist_rows))
 
     out.append("\n### Samples\n")
-    out.append("| Value | Year | Era |")
-    out.append("| --- | --- | --- |")
-    for s in era_rows[:10]:
-        out.append(f"| {s['value']} | {s['year']} | {s['era']} |")
+    sample_rows = [
+        [s["value"], s["year"], s["era"]] for s in era_rows[:10]
+    ]
+    out.append(_build_table(["Value", "Year", "Era"], sample_rows))
 
     out.append(
         f"\n**Recommendation:** Extract era into separate 'era' column "
@@ -1908,10 +2101,11 @@ def extract_era_column(column: str, tool_context: ToolContext) -> str:
 
     if not era_counts.is_empty():
         out.append("\n### Era Distribution\n")
-        out.append("| Era | Count |")
-        out.append("| --- | ---: |")
-        for row in era_counts.to_dicts():
-            out.append(f"| {row['era']} | {row['count']:,} |")
+        era_dist_rows = [
+            [str(row["era"]), f"{row['count']:,}"]
+            for row in era_counts.to_dicts()
+        ]
+        out.append(_build_table(["Era", "Count"], era_dist_rows))
 
     out.append(f"\n### Before\n\n{_to_markdown(before_sample)}")
     out.append(f"\n### After\n\n{_to_markdown(after_sample)}")

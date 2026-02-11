@@ -22,6 +22,7 @@ from google.genai import types
 
 import google.auth
 
+from app.callbacks import intercept_file_upload
 from app.prompts import COORDINATOR_PROMPT
 from app import tools
 
@@ -59,8 +60,10 @@ root_agent = Agent(
     ),
     model=_gemini_model("COORDINATOR_MODEL"),
     instruction=COORDINATOR_PROMPT,
+    before_model_callback=intercept_file_upload,
     tools=[
         tools.load_csv,
+        tools.fix_unknown_values,
         tools.inspect_raw_file,
         tools.profile_all_columns,
         tools.audit_all_columns,
