@@ -28,12 +28,23 @@ class CSVReader:
         self._db_table = self._generate_table_name(filepath)
 
     def _generate_table_name(self, filepath: str) -> str:
-        """Generates a safe table name from the filename."""
-        base = os.path.basename(filepath)
-        name, _ = os.path.splitext(base)
-        # Sanitize: replace non-alphanumeric with defaults, keep it simple
-        safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', name).lower()
-        return f"table_{safe_name}"
+        """Generates a safe table name from the filename.
+
+        Converts the filename stem to snake_case. Temp files (from uploads
+        via the UI) are detected and mapped to 'uploaded_data'.
+
+        Examples:
+            'MY FILE.csv'         -> 'my_file'
+            '/tmp/tmpXb3kq.csv'   -> 'uploaded_data'
+            'Sales-Report 2024.csv' -> 'sales_report_2024'
+        """
+        stem = os.path.splitext(os.path.basename(filepath))[0]
+        # Temp files from uploads have no meaningful name
+        if stem.startswith("tmp") and len(stem) <= 12:
+            return "uploaded_data"
+        name = re.sub(r'[^\w]+', '_', stem)
+        name = re.sub(r'_+', '_', name).strip('_').lower()
+        return name or "uploaded_data"
 
     @property
     def db_table(self) -> str:

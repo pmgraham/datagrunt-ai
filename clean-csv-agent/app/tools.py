@@ -29,26 +29,6 @@ from app.datagrunt import CSVReader, DuckDBQueries
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _filename_to_snake_case(file_path: str) -> str:
-    """Extract the filename stem from a path and convert to snake_case.
-
-    Returns 'uploaded_data' for temp files where the name is meaningless.
-    Examples:
-        '/home/user/MY FILE.csv'  -> 'my_file'
-        '/tmp/tmpXb3kq.csv'       -> 'uploaded_data'
-        'Sales-Report 2024.csv'   -> 'sales_report_2024'
-    """
-    stem = os.path.splitext(os.path.basename(file_path))[0]
-    # Temp files from uploads have no meaningful name
-    if stem.startswith("tmp") and len(stem) <= 12:
-        return "uploaded_data"
-    # Replace non-alphanumeric characters (except underscores) with underscores
-    name = _re.sub(r'[^\w]+', '_', stem)
-    # Collapse multiple underscores, strip edges
-    name = _re.sub(r'_+', '_', name).strip('_')
-    return name.lower() or "uploaded_data"
-
-
 def _validate_path(path: str) -> str:
     """Validates that the path is absolute and exists.
 
@@ -324,9 +304,6 @@ def load_csv(
 
     # Store path early so inspect_raw_file can use it if we fail
     tool_context.state["csv_path"] = file_path
-    # Capture original filename for the cleaned artifact name
-    if not tool_context.state.get("original_filename"):
-        tool_context.state["original_filename"] = _filename_to_snake_case(file_path)
 
     # Count source lines (minus header) for verification
     source_line_count = 0
@@ -346,6 +323,10 @@ def load_csv(
     reader = CSVReader(file_path, engine="duckdb")
     _readers[file_path] = reader
     table = reader.db_table
+
+    # Store table name for artifact filename derivation
+    if not tool_context.state.get("table_name"):
+        tool_context.state["table_name"] = table
 
     # CSV parsing configurations to try (in order of preference)
     parse_configs = [
@@ -1199,8 +1180,8 @@ async def save_cleaned_csv(tool_context: ToolContext) -> str:
     if not csv_path or not os.path.exists(csv_path):
         return _format_error("No cleaned file found. Run execute_cleaning_plan first.")
 
-    original_name = tool_context.state.get("original_filename", "uploaded_data")
-    artifact_filename = f"{original_name}_cleaned.csv"
+    table_name = tool_context.state.get("table_name", "uploaded_data")
+    artifact_filename = f"{table_name}_cleaned.csv"
     try:
         with open(csv_path, "rb") as f:
             csv_bytes = f.read()
@@ -1216,7 +1197,10 @@ async def save_cleaned_csv(tool_context: ToolContext) -> str:
 
     return (
         f"## Download Ready\n\n"
-        f"Cleaned **{row_count:,} rows** — your file is ready for download."
+        f"- **Filename:** `{artifact_filename}`\n"
+        f"- **Rows:** {row_count:,}\n\n"
+        f"A download link labeled **text.csv** will appear in the chat. "
+        f"Tell the user to click it to download `{artifact_filename}`."
     )
 
 

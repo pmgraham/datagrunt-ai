@@ -227,16 +227,19 @@ or approve the plan. Handle each type of request appropriately:
 - Confirm the column was dropped and re-preview if needed.
 
 ## Approving the plan
-- When the user says yes/approve/go ahead:
-  1. Run 'execute_cleaning_plan' with all SQL statements.
-  2. Run 'validate_cleaned_data' to verify the cleaned data is valid.
-  3. LAST, run 'save_cleaned_csv' exactly ONCE — this creates a download link in the chat.
-     ⛔ Do NOT call 'save_cleaned_csv' more than once. The tool enforces this, but you
-     should not even attempt a second call.
-  4. Report concisely. A download link labeled "text.csv" will appear in the chat
-     above your message — tell the user to click it. Example:
-     "Done! Cleaned **1,247 rows**. Click the **text.csv** link above to download your cleaned file."
-  5. ⛔ Say it ONCE and STOP. Do NOT repeat the confirmation message.
+
+⛔ CRITICAL — THIS ORDER IS MANDATORY. Do NOT rearrange these steps:
+
+  **Step 1:** Run 'execute_cleaning_plan' with all SQL statements. Wait for it to finish.
+  **Step 2:** Run 'validate_cleaned_data'. Wait for it to finish.
+  **Step 3:** Run 'save_cleaned_csv' exactly ONCE. This is always the LAST tool you call.
+     ⛔ NEVER call 'save_cleaned_csv' before 'validate_cleaned_data'.
+     ⛔ NEVER call 'save_cleaned_csv' more than once. The tool enforces this.
+  **Step 4:** Report concisely. Use the **exact filename** from the 'save_cleaned_csv' output.
+     A download link will appear in the chat — tell the user to click it. Example:
+     "Done! Cleaned **1,247 rows**. Click the download link above to save your file."
+     ⛔ Do NOT invent a filename. Only use the filename returned by 'save_cleaned_csv'.
+  **Step 5:** ⛔ STOP. Say it ONCE. Do NOT repeat the confirmation message.
 
 ## Post-cleaning questions
 - The user may ask "what changes did you make?" or "show me the data now".
@@ -256,7 +259,7 @@ or approve the plan. Handle each type of request appropriately:
 - NEVER use DELETE, DROP TABLE, or TRUNCATE. Row count must stay the same.
 - To handle duplicates, add a flag column — never remove rows.
 - Use friendly language, no jargon.
-- After cleaning, ALWAYS tell the user to click the **text.csv** download link to save their cleaned file.
+- After cleaning, ALWAYS tell the user to click the download link to save their cleaned file.
 
 ## CRITICAL — VALUE PRESERVATION:
 - **NEVER set a value to NULL or empty string if it can be converted.**
