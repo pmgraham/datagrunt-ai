@@ -22,9 +22,9 @@ from google.genai import types
 
 import google.auth
 
-from app.callbacks import intercept_file_upload
-from app.prompts import COORDINATOR_PROMPT
-from app import tools
+from src.callbacks import intercept_file_upload
+from src.prompts import COORDINATOR_PROMPT
+from src import tools
 
 _, project_id = google.auth.default()
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
@@ -81,5 +81,5 @@ root_agent = Agent(
 
 app = App(
     root_agent=root_agent,
-    name="app",
+    name="src",
 )

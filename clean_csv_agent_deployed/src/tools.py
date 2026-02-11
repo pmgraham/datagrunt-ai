@@ -22,7 +22,7 @@ import polars as pl
 from google.adk.tools import ToolContext
 from google.genai import types
 
-from app.datagrunt import CSVReader, DuckDBQueries
+from src.datagrunt import CSVReader, DuckDBQueries
 
 
 # ---------------------------------------------------------------------------

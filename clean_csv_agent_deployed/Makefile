@@ -19,7 +19,7 @@ playground:
 	@echo "|                                                                             |"
 	@echo "| 💡 Try asking: What's the weather in San Francisco?                         |"
 	@echo "|                                                                             |"
-	@echo "| 🔍 IMPORTANT: Select the 'app' folder to interact with your agent.          |"
+	@echo "| 🔍 IMPORTANT: Select the 'src' folder to interact with your agent.          |"
 	@echo "==============================================================================="
 	uv run adk web . --port 8501 --reload_agents
 
@@ -31,13 +31,14 @@ playground:
 # Usage: make deploy [AGENT_IDENTITY=true] - Set AGENT_IDENTITY=true to enable per-agent IAM identity (Preview)
 deploy:
 	# Export dependencies to requirements file using uv export.
-	(uv export --no-hashes --no-header --no-dev --no-emit-project --no-annotate > app/app_utils/.requirements.txt 2>/dev/null || \
-	uv export --no-hashes --no-header --no-dev --no-emit-project > app/app_utils/.requirements.txt) && \
-	uv run -m app.app_utils.deploy \
-		--source-packages=./app \
-		--entrypoint-module=app.agent_engine_app \
+	(uv export --no-hashes --no-header --no-dev --no-emit-project --no-annotate > src/app_utils/.requirements.txt 2>/dev/null || \
+	uv export --no-hashes --no-header --no-dev --no-emit-project > src/app_utils/.requirements.txt) && \
+	uv run -m src.app_utils.deploy \
+		--source-packages=./src \
+		--source-packages=./agent.py \
+		--entrypoint-module=src.agent_engine_app \
 		--entrypoint-object=agent_engine \
-		--requirements-file=app/app_utils/.requirements.txt \
+		--requirements-file=src/app_utils/.requirements.txt \
 		$(if $(AGENT_IDENTITY),--agent-identity)
 
 # Alias for 'make deploy' for backward compatibility
@@ -63,7 +64,7 @@ eval:
 	@echo "| Running Agent Evaluation                                                    |"
 	@echo "==============================================================================="
 	uv sync --dev --extra eval
-	uv run adk eval ./app $${EVALSET:-tests/eval/evalsets/basic.evalset.json} \
+	uv run adk eval ./src $${EVALSET:-tests/eval/evalsets/basic.evalset.json} \
 		$(if $(EVAL_CONFIG),--config_file_path=$(EVAL_CONFIG),$(if $(wildcard tests/eval/eval_config.json),--config_file_path=tests/eval/eval_config.json,))
 
 # Run evaluation with all evalsets

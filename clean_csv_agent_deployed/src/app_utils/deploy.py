@@ -186,12 +186,12 @@ def setup_agent_identity(client: Any, project: str, display_name: str) -> Any:
 @click.option(
     "--source-packages",
     multiple=True,
-    default=["./app"],
-    help="Source packages to deploy. Can be specified multiple times (e.g., --source-packages=./app --source-packages=./lib)",
+    default=["./src", "./agent.py"],
+    help="Source packages to deploy. Can be specified multiple times (e.g., --source-packages=./src --source-packages=./lib)",
 )
 @click.option(
     "--entrypoint-module",
-    default="app.agent_engine_app",
+    default="src.agent_engine_app",
     help="Python module path for the agent entrypoint (required)",
 )
 @click.option(
@@ -201,7 +201,7 @@ def setup_agent_identity(client: Any, project: str, display_name: str) -> Any:
 )
 @click.option(
     "--requirements-file",
-    default="app/app_utils/.requirements.txt",
+    default="src/app_utils/.requirements.txt",
     help="Path to requirements.txt file",
 )
 @click.option(
